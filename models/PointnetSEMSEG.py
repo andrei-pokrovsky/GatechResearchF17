@@ -10,6 +10,19 @@ import pytorch_utils as pt_utils
 from TransformNets import TransformNet
 
 
+def model_fn_decorator(criterion):
+    def model_fn(model, inputs, labels):
+        preds = model(inputs)
+        loss = criterion(preds.view(labels.numel(), -1), labels.view(-1))
+
+        _, classes = torch.max(preds.data, 2)
+        acc = (classes == labels.data).sum()
+
+        return preds, loss, acc
+
+    return model_fn
+
+
 class Pointnet(nn.Module):
     def __init__(self):
         super().__init__()

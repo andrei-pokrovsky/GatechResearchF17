@@ -10,172 +10,121 @@ import tensorboard_logger as tb_log
 import os
 
 from models.PointnetSEMSEG import Pointnet
+from models.PointnetSEMSEG import model_fn_decorator
 from data.Indoor3DSemSegLoader import Indoor3DSemSeg
 import models.pytorch_utils as pt_utils
 
-fresh = True
+import argparse
 
-BATCH_SIZE = 32
-NUM_POINT = 2048
+parser = argparse.ArgumentParser(description="Arg parser")
+parser.add_argument(
+    "-batch_size", type=int, default=32, help="Batch size [default: 32]")
+parser.add_argument(
+    "-num_points",
+    type=int,
+    default=2048,
+    help="Number of points to train with [default: 2048]")
+parser.add_argument(
+    "-weight_decay", type=float, default=1e-5, help="L2 regularization coeff")
+parser.add_argument(
+    "-lr",
+    type=float,
+    default=1e-2,
+    help="Initial learning rate [default: 1e-2]")
+parser.add_argument(
+    "-lr_decay",
+    type=float,
+    default=0.5,
+    help="Learning rate decay gamma [default: 0.5]")
+parser.add_argument(
+    "-decay_step",
+    type=int,
+    default=20,
+    help="Learning rate decay step [default: 20]")
+parser.add_argument(
+    "-bn_momentum",
+    type=float,
+    default=0.5,
+    help="Initial batch norm momentum [default: 0.5]")
+parser.add_argument(
+    "-bn_decay",
+    type=float,
+    default=0.5,
+    help="Batch norm momentum decay gamma [default: 0.5]")
+parser.add_argument(
+    "-checkpoint", type=str, default=None, help="Checkpoint to start from")
+parser.add_argument(
+    "-epochs", type=int, default=200, help="Number of epochs to train for")
+parser.add_argument(
+    "-run_name",
+    type=str,
+    default="sem_seg_run_1",
+    help="Name for run in tensorboard_logger")
 
 BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 
-test_set = Indoor3DSemSeg(NUM_POINT, BASE_DIR, train=False)
-test_loader = DataLoader(
-    test_set,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    pin_memory=True,
-    num_workers=1)
-
-DECAY_STEP = 20
-lr_init = 1e-2
 lr_clip = 1e-5
-lr_decay = 0.5
-
-model = Pointnet()
-model.cuda()
-optimizer = optim.Adam(model.parameters(), lr=lr_init, weight_decay=1e-4)
-lr_scheduler = lr_sched.LambdaLR(
-    optimizer,
-    lambda e: max(lr_decay**(e // DECAY_STEP), lr_clip))
-epoch_start = 1
-best_prec = 0
-
-tb_log.configure('runs/run-1')
-
-if not fresh:
-    epoch_start, best_prec = pt_utils.load_checkpoint(
-        model, optimizer, filename='sem_seg_best')
-    lr_scheduler.step(epoch_start)
-
-
-
-def get_bn_momentum(epoch):
-    bn_init = 0.5
-    bn_momentum = bn_init * (0.5**((epoch - 1) // DECAY_STEP))
-    return max(bn_momentum, 0.01)
-
-
-NUM_EPOCHS = 200
-
-
-def train():
-    global best_prec
-    if train:
-        criterion = nn.CrossEntropyLoss()
-
-        train_set = Indoor3DSemSeg(NUM_POINT, BASE_DIR)
-        train_loader = DataLoader(
-            train_set,
-            batch_size=BATCH_SIZE,
-            pin_memory=True,
-            num_workers=1,
-            shuffle=True)
-
-        for epoch in range(epoch_start, NUM_EPOCHS + 1):
-            print("{0}TRAIN{0}".format("-" * 5))
-            train_prec, train_loss = train_epoch(epoch, optimizer, criterion,
-                                                 train_loader)
-            tb_log.log_value('training accuracy', train_prec, epoch)
-            tb_log.log_value('training loss', train_loss, epoch)
-
-            print("{0}EVAL{0}".format("-" * 5))
-            val_prec, val_loss = eval_epoch(epoch, test_loader, criterion)
-            tb_log.log_value('validation accuracy', val_prec, epoch)
-            tb_log.log_value('validation loss', val_loss, epoch)
-
-            is_best = val_prec > best_prec
-            best_prec = max(val_prec, best_prec)
-            pt_utils.save_checkpoint(
-                pt_utils.checkpoint_state(model, optimizer, best_prec, epoch),
-                is_best,
-                filename='sem_seg_checkpoint',
-                bestname='sem_seg_best')
-
-            lr_scheduler.step()
-
-
-def train_epoch(epoch, optimizer, criterion, train_loader):
-    model.train()
-    model.set_bn_momentum(get_bn_momentum(epoch))
-    total_loss, total_correct, total_seen, count = (0.0, ) * 4
-
-    for i, data in enumerate(train_loader, 0):
-        inputs, labels = data
-        labels = Variable(labels.cuda())
-
-        optimizer.zero_grad()
-        preds = model(Variable(inputs.cuda()))
-
-        long_labels = labels.view(-1)
-        loss = criterion(preds.view(long_labels.size(0), -1), long_labels)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.data[0]
-        count += 1.0
-
-        _, classes = torch.max(preds.data, 2)
-        total_correct += (classes.view(-1) == long_labels.data).sum()
-        total_seen += long_labels.size()[0]
-
-        if (i + 1) % (len(train_loader) // 5) == 0:
-            print("Epoch {} progress: [{:<5d} / {:<5d} ({:3.0f})%]".format(
-                epoch, i, len(train_loader), float(i) / len(train_loader) *
-                1e2))
-
-    print("[{}] Mean loss: {:2.4f}  Mean Acc: {:2.3f}%".format(
-        epoch, total_loss / count, total_correct / total_seen * 1e2))
-
-    return total_correct / total_seen, total_loss / count
-
-
-def eval_epoch(epoch, d_loader, criterion=None):
-    model.eval()
-    num_points = 2**7
-    accuracy = []
-    losses = []
-    while num_points <= 2**12:
-        d_loader.dataset.set_num_points(num_points)
-        total_correct = 0.0
-        total_seen = 0.0
-        total_loss = 0.0
-        for i, data in enumerate(d_loader, 0):
-            inputs, labels = data
-            labels = labels.cuda()
-
-            model.zero_grad()
-            preds = model(Variable(inputs.cuda(), requires_grad=False))
-            preds.detach_()
-
-            if criterion is not None:
-                long_labels = labels.view(-1)
-                total_loss += criterion(
-                    preds.view(long_labels.size(0), -1),
-                    Variable(long_labels, requires_grad=False)).data[0]
-
-            _, classes = torch.max(preds.data, 2)
-            total_correct += (classes.view(-1) == labels.view(-1)).sum()
-            total_seen += inputs.size()[0] * inputs.size()[1]
-
-        if criterion is None:
-            print("[{}, {}] Eval Accuracy: {:2.3f}%".format(
-                epoch, num_points, total_correct / total_seen * 1e2))
-        else:
-            print("[{}, {}] Eval Accuracy: {:2.3f}%\t\tEval Loss: {:1.3f}".
-                  format(epoch, num_points, total_correct / total_seen * 1e2,
-                         total_loss / len(d_loader)))
-        num_points *= 2
-
-        accuracy.append(total_correct / total_seen)
-        losses.append(total_loss / len(d_loader))
-
-    if criterion is None:
-        return np.mean(accuracy)
-    else:
-        return np.mean(accuracy), np.mean(losses)
-
+bnm_clip = 1e-2
 
 if __name__ == "__main__":
-    train()
-    _ = eval_epoch(-1, test_loader)
+    args = parser.parse_args()
+    tb_log.configure('runs/{}'.format(args.run_name))
+
+    test_set = Indoor3DSemSeg(args.num_points, BASE_DIR, train=False)
+    test_loader = DataLoader(
+        test_set,
+        batch_size=args.batch_size,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=1)
+
+    train_set = Indoor3DSemSeg(args.num_points, BASE_DIR)
+    train_loader = DataLoader(
+        train_set,
+        batch_size=args.batch_size,
+        pin_memory=True,
+        num_workers=1,
+        shuffle=True)
+
+    model = Pointnet()
+    model.cuda()
+    optimizer = optim.Adam(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+    lr_lbmd = lambda e: max(args.lr_decay**(e // args.decay_step), lr_clip / args.lr)
+    bnm_lmbd = lambda e: max(args.bn_momentum * args.bn_decay**(e // args.decay_step), bnm_clip)
+
+    if args.checkpoint is None:
+        lr_scheduler = lr_sched.LambdaLR(optimizer, lr_lbmd)
+        bnm_scheduler = pt_utils.BNMomentumScheduler(model, bnm_lmbd)
+        start_epoch = 1
+        best_prec = 0
+    else:
+        start_epoch, best_prec = pt_utils.load_checkpoint(
+            model, optimizer, filename=args.checkpoint.split(".")[0])
+
+        lr_scheduler = lr_sched.LambdaLR(
+            optimizer, lr_lbmd, last_epoch=start_epoch)
+        bnm_scheduler = pt_utils.BNMomentumScheduler(
+            model, bnm_lmbd, last_epoch=start_epoch)
+
+    model_fn = model_fn_decorator(nn.CrossEntropyLoss())
+
+    trainer = pt_utils.Trainer(
+        model,
+        model_fn,
+        optimizer,
+        checkpoint_name="sem_seg_checkpoint",
+        best_name="sem_seg_best",
+        lr_scheduler=lr_scheduler,
+        bnm_scheduler=bnm_scheduler)
+
+    trainer.train(
+        start_epoch,
+        args.epochs,
+        test_loader,
+        train_loader,
+        best_prec=best_prec)
+
+    if epoch_start == args.epochs:
+        _ = trainer.eval_epoch(start_epoch, test_loader)

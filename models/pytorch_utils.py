@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+from torch.autograd import Variable
+import numpy as np
+import tensorboard_logger as tb_log
 import shutil, os
 
 
@@ -36,7 +39,8 @@ class _ConvBase(nn.Sequential):
                             out_size,
                             kernel_size=kernel_size,
                             stride=stride,
-                            padding=padding, bias=not bn))
+                            padding=padding,
+                            bias=not bn))
         init(self[0].weight)
 
         if not bn:
@@ -176,3 +180,143 @@ def load_checkpoint(model, optimizer, filename='checkpoint'):
         print("==> Checkpoint '{}' not found".format(filename))
 
     return epoch, best_prec
+
+
+class BNMomentumScheduler(object):
+    def __init__(self, model, bn_lambda, last_epoch=-1):
+        self.model = model
+
+        if not callable(getattr(self.model, "set_bn_momentum")):
+            raise KeyError(
+                "Class '{}' has no method 'set_bn_momentum(bn_momentum)'".
+                format(type(model).__name__))
+
+        self.lmbd = bn_lambda
+
+        self.step(last_epoch + 1)
+        self.last_epoch = last_epoch
+
+    def step(self, epoch=None):
+        if epoch is None:
+            epoch = self.last_epoch + 1
+
+        self.last_epoch = epoch
+        self.model.set_bn_momentum(self.lmbd(epoch))
+
+
+class Trainer(object):
+    def __init__(self,
+                 model,
+                 model_fn,
+                 optimizer,
+                 checkpoint_name="ckpt",
+                 best_name="best",
+                 lr_scheduler=None,
+                 bnm_scheduler=None):
+        self.model, self.model_fn, self.optimizer, self.lr_scheduler, self.bnm_scheduler = (
+            model, model_fn, optimizer, lr_scheduler, bnm_scheduler)
+
+        self.checkpoint_name, self.best_name = checkpoint_name, best_name
+
+    def _train_epoch(self, epoch, d_loader):
+        self.model.train()
+        total_loss, total_correct, total_seen, count = (0.0, ) * 4
+
+        next_progress_post = 20.0
+        for i, data in enumerate(d_loader, 0):
+            inputs, labels = data
+            inputs, labels = Variable(inputs.cuda()), Variable(labels.cuda())
+
+            self.optimizer.zero_grad()
+            _, loss, num_correct = self.model_fn(self.model, inputs, labels)
+
+            loss.backward()
+            self.optimizer.step()
+            total_loss += loss.data[0]
+            count += 1.0
+
+            total_correct += num_correct
+            total_seen += labels.numel()
+
+            idx = (epoch - 1) * len(d_loader) + i
+            tb_log.log_value("Training loss", loss.data[0], step=idx)
+            tb_log.log_value(
+                "Training error",
+                1.0 - (num_correct / labels.numel()),
+                step=idx)
+
+            progress = float(i) / len(d_loader) * 1e2
+            if progress > next_progress_post:
+                print("Epoch {} progress: [{:<5d} / {:<5d} ({:3.0f})%]".format(
+                    epoch, i, len(d_loader), progress))
+                next_progress_post += 20.0
+
+            d_loader.dataset.randomize()
+
+        print("[{}] Mean loss: {:2.4f}  Mean Acc: {:2.3f}%".format(
+            epoch, total_loss / count, total_correct / total_seen * 1e2))
+
+    def eval_epoch(self, epoch, d_loader):
+        self.model.eval()
+        num_points = 2**7
+        accuracy = []
+        losses = []
+        while num_points <= 2**12:
+            d_loader.dataset.set_num_points(num_points)
+            total_correct = 0.0
+            total_seen = 0.0
+            total_loss = 0.0
+            for i, data in enumerate(d_loader, 0):
+                inputs, labels = data
+                inputs, labels = Variable(
+                    inputs.cuda(), volatile=True), Variable(
+                        labels.cuda(), volatile=True)
+
+                _, loss, num_correct = self.model_fn(self.model, inputs,
+                                                     labels)
+
+                total_loss += loss.data[0]
+                total_correct += num_correct
+                total_seen += labels.numel()
+                d_loader.dataset.randomize()
+
+            print("[{}, {}] Eval Accuracy: {:2.3f}%\t\tEval Loss: {:1.3f}".
+                  format(epoch, num_points, total_correct / total_seen * 1e2,
+                         total_loss / len(d_loader)))
+            num_points *= 2
+
+            accuracy.append(total_correct / total_seen)
+            losses.append(total_loss / len(d_loader))
+
+        return np.mean(accuracy), np.mean(losses)
+
+    def train(self,
+              start_epoch,
+              n_epochs,
+              test_loader,
+              train_loader,
+              best_prec=0.0):
+        for epoch in range(start_epoch, n_epochs + 1):
+            if self.lr_scheduler is not None:
+                self.lr_scheduler.step()
+
+            if self.bnm_scheduler is not None:
+                self.bnm_scheduler.step()
+
+            print("{0}TRAIN{0}".format("-" * 5))
+            self._train_epoch(epoch, train_loader)
+
+            print("{0}EVAL{0}".format("-" * 5))
+            val_prec, val_loss = self.eval_epoch(epoch, test_loader)
+            tb_log.log_value('Validation error', 1.0 - val_prec, epoch)
+            tb_log.log_value('Validation loss', val_loss, epoch)
+
+            is_best = val_prec > best_prec
+            best_prec = max(val_prec, best_prec)
+            save_checkpoint(
+                checkpoint_state(self.model, self.optimizer, best_prec, epoch),
+                is_best,
+                filename=self.checkpoint_name,
+                bestname=self.best_name)
+
+        return best_prec

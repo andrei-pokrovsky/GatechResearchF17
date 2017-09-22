@@ -82,6 +82,9 @@ class Indoor3DSemSeg(data.Dataset):
     def set_num_points(self, pts):
         self.num_points = pts
 
+    def randomize(self):
+        pass
+
 
 
 

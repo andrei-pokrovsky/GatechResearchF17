@@ -19,8 +19,16 @@ def _load_data_file(name):
 
 
 class ModelNet40Cls(data.Dataset):
-    def __init__(self, num_points, root, train=True, download=True):
+    def __init__(self,
+                 num_points,
+                 root,
+                 transforms=None,
+                 train=True,
+                 download=True):
         super().__init__()
+
+        self.transforms = transforms
+
         root = os.path.abspath(root)
         self.folder = "modelnet40_ply_hdf5_2048"
         self.data_dir = os.path.join(root, self.folder)
@@ -51,37 +59,19 @@ class ModelNet40Cls(data.Dataset):
             label_list.append(labels)
 
         self.points = np.concatenate(point_list, 0)
-        print(np.mean(self.points.max(axis=1) - self.points.min(axis=1), axis=0))
         self.labels = np.concatenate(label_list, 0)
 
+        self.randomize()
+
     def __getitem__(self, idx):
-        actual_number_of_points = min(
-            max(
-                np.random.randint(self.num_points * 0.8,
-                                  self.num_points * 1.2), 1), 2048)
-        pt_idxs = np.arange(0, actual_number_of_points)
+        pt_idxs = np.arange(0, self.actual_number_of_points)
         np.random.shuffle(pt_idxs)
 
-        current_points = torch.from_numpy(self.points[idx, pt_idxs, :]).type(
-            torch.FloatTensor)
+        current_points = self.points[idx, pt_idxs, :]
         label = torch.from_numpy(self.labels[idx]).type(torch.LongTensor)
 
-        current_points = rotate(current_points)
-        current_points = translate(current_points)
-        current_points = scale(current_points)
-        current_points = jitter(current_points)
-
-        if not (actual_number_of_points == 2048
-                or actual_number_of_points == int(1.2 * self.num_points)):
-            current_points = torch.cat(
-                [
-                    current_points,
-                    torch.FloatTensor(
-                        min(2048 - actual_number_of_points,
-                            int(1.2 * self.num_points) -
-                            actual_number_of_points), 3).zero_()
-                ],
-                dim=0)
+        if self.transforms is not None:
+            current_points = self.transforms(current_points)
 
         return current_points, label
 
@@ -91,37 +81,28 @@ class ModelNet40Cls(data.Dataset):
     def set_num_points(self, pts):
         self.num_points = pts
 
-
-def rotate(points):
-    rotation_angle = np.random.uniform() * 2 * np.pi
-    cosval = np.cos(rotation_angle)
-    sinval = np.sin(rotation_angle)
-    rotation_matrix = torch.FloatTensor([[cosval, 0, sinval], [0, 1, 0],
-                                         [-sinval, 0, cosval]])
-    return points @ rotation_matrix
-
-
-def jitter(points, sigma=0.01, clip=0.05):
-    jittered_data = torch.FloatTensor(*points.size()).normal_(
-        mean=0.0, std=sigma).clamp_(-clip, clip)
-    return points + jittered_data
-
-
-def translate(points, sigma=1.0, clip=3.0):
-    translation = (torch.FloatTensor(3).normal_(mean=0.0, std=sigma)).clamp_(
-        -clip, clip)
-    return points + translation
-
-
-def scale(points, sigma=1.0, clip=1.8):
-    mean = 2.0
-    scaler = (torch.FloatTensor(1).normal_(mean=mean, std=sigma)).clamp_(
-        max(mean - clip, 0.01), mean + clip)
-    return scaler * points
+    def randomize(self):
+        self.actual_number_of_points = min(
+            max(
+                np.random.randint(self.num_points * 0.8,
+                                  self.num_points * 1.2), 1),
+            self.points.shape[1])
 
 
 if __name__ == "__main__":
-    dset = ModelNet40Cls(16, "./", train=True)
+    from torchvision import transforms
+    import data_utils as d_utils
+
+
+    transforms = transforms.Compose([
+        d_utils.PointcloudToTensor(),
+        d_utils.PointcloudRotate(x_axis=True),
+        d_utils.PointcloudScale(),
+        d_utils.PointcloudTranslate(),
+        d_utils.PointcloudJitter()
+    ])
+    dset = ModelNet40Cls(16, "./", train=True, transforms=transforms)
     print(dset[0][0])
+    print(dset[0][1])
     print(len(dset))
     dloader = torch.utils.data.DataLoader(dset, batch_size=32, shuffle=True)

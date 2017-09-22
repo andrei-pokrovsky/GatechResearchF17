@@ -5,192 +5,136 @@ import torch.nn as nn
 import numpy as np
 from torch.utils.data import DataLoader
 from torch.autograd import Variable
+from torchvision import transforms
 import os
 import tensorboard_logger as tb_log
 
 from models.PointnetCLS import Pointnet
+from models.PointnetCLS import model_fn_decorator
 from data.ModelNet40Loader import ModelNet40Cls
 import models.pytorch_utils as pt_utils
+import data.data_utils as d_utils
+import argparse
 
-fresh = True
+parser = argparse.ArgumentParser(description="Arg parser")
+parser.add_argument(
+    "-batch_size", type=int, default=128, help="Batch size [default: 128]")
+parser.add_argument(
+    "-num_points",
+    type=int,
+    default=1024,
+    help="Number of points to train with [default: 1024]")
+parser.add_argument(
+    "-weight_decay", type=float, default=1e-5, help="L2 regularization coeff")
+parser.add_argument(
+    "-lr",
+    type=float,
+    default=1e-2,
+    help="Initial learning rate [default: 1e-2]")
+parser.add_argument(
+    "-lr_decay",
+    type=float,
+    default=0.7,
+    help="Learning rate decay gamma [default: 0.7]")
+parser.add_argument(
+    "-decay_step",
+    type=int,
+    default=20,
+    help="Learning rate decay step [default: 20]")
+parser.add_argument(
+    "-bn_momentum",
+    type=float,
+    default=0.5,
+    help="Initial batch norm momentum [default: 0.5]")
+parser.add_argument(
+    "-bnm_decay",
+    type=float,
+    default=0.5,
+    help="Batch norm momentum decay gamma [default: 0.5]")
+parser.add_argument(
+    "-checkpoint", type=str, default=None, help="Checkpoint to start from")
+parser.add_argument(
+    "-epochs", type=int, default=200, help="Number of epochs to train for")
+parser.add_argument(
+    "-run_name",
+    type=str,
+    default="cls_run_1",
+    help="Name for run in tensorboard_logger")
 
-BATCH_SIZE = 32
-NUM_POINT = 1024
-
-BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
-
-test_set = ModelNet40Cls(NUM_POINT, BASE_DIR, train=False)
-test_loader = DataLoader(
-    test_set,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    num_workers=2,
-    pin_memory=True)
-
-tb_log.configure('runs/cls-run-8')
-
-best_prec = 0.0
-start_epoch = 1
-
-DECAY_STEP = 20
-lr_init = 1e-2
 lr_clip = 1e-5
-lr_decay = 0.7
-
-model = Pointnet()
-model.cuda()
-optimizer = optim.Adam(model.parameters(), lr=lr_init, weight_decay=1e-9)
-lr_scheduler = lr_sched.LambdaLR(
-    optimizer, lambda e: max(lr_decay**(e // DECAY_STEP), lr_clip))
-
-if not fresh:
-    start_epoch, best_prec = pt_utils.load_checkpoint(
-        model, optimizer, filename='cls_best')
-    lr_scheduler.step(start_epoch)
-
-bn_momentum_clip = 0.01
-bn_momentum_decay = 0.5
-
-
-def get_bn_momentum(epoch):
-    bn_init = 0.5
-    bn_momentum = bn_init * (bn_momentum_decay**((epoch - 1) // DECAY_STEP))
-    return max(bn_momentum, bn_momentum_clip)
-
-def model_fn_decorator(criterion):
-    transform_reg = 1e-3
-
-    def ortho_loss(matrix):
-        return torch.dist(
-            matrix.bmm(matrix.transpose(1, 2)),
-            Variable(
-                torch.eye(matrix.size(1), matrix.size(2)).type(
-                    torch.cuda.FloatTensor)))
-
-    def wrapped(model, inputs, labels):
-        preds, end_points = model(inputs)
-
-        transform_loss = 0.0
-        for _, T in end_points.items():
-            transform_loss += ortho_loss(T)
-
-        preds_loss = criterion(preds, labels)
-        loss = preds_loss + transform_reg * transform_loss
-
-        return loss, preds
-
-    return wrapped
-
-model_fn = model_fn_decorator(nn.CrossEntropyLoss())
-
-
-NUM_EPOCHS = 300
-
-
-def train():
-    global best_prec
-    if train:
-
-        train_set = ModelNet40Cls(NUM_POINT, BASE_DIR)
-        train_loader = DataLoader(
-            train_set,
-            batch_size=BATCH_SIZE,
-            shuffle=True,
-            num_workers=2,
-            pin_memory=True)
-
-        for epoch in range(start_epoch, NUM_EPOCHS + 1):
-            lr_scheduler.step()
-
-            print("{0}TRAIN{0}".format("-" * 5))
-            train_epoch(epoch, optimizer, model_fn, train_loader)
-
-            print("{0}EVAL{0}".format("-" * 5))
-            val_prec, val_loss = eval_epoch(epoch, model_fn, test_loader)
-            tb_log.log_value('validation error', 1.0 - val_prec, epoch - 1)
-            tb_log.log_value("validation loss", val_loss, epoch - 1)
-
-            is_best = val_prec > best_prec
-            best_prec = max(val_prec, best_prec)
-            pt_utils.save_checkpoint(
-                pt_utils.checkpoint_state(model, optimizer, best_prec, epoch),
-                is_best,
-                filename='cls_checkpoint',
-                bestname='cls_best')
-
-
-
-def train_epoch(epoch, optimizer, model_fn, train_loader):
-    model.train()
-    model.set_bn_momentum(get_bn_momentum(epoch))
-    total_loss, total_correct, total_seen, count = (0.0, ) * 4
-
-    next_post = 20.0
-
-
-    for i, data in enumerate(train_loader, 0):
-        inputs, labels = data
-        inputs, labels = Variable(inputs.cuda()), Variable(labels.squeeze().cuda())
-
-        optimizer.zero_grad()
-        loss, preds = model_fn(model, inputs, labels)
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.data[0]
-        count += 1.0
-
-        _, classes = torch.max(preds.data, 1)
-        num_correct = (classes == labels.data).sum()
-        total_correct += num_correct
-        total_seen += inputs.size(0)
-
-        log_idx = (epoch - 1) * len(train_loader) + i
-        tb_log.log_value('training loss', loss.data[0], log_idx)
-        tb_log.log_value('training error',
-                         1.0 - num_correct / float(inputs.size(0)), log_idx)
-
-        progress = float(i + 1) / len(train_loader) * 1e2
-        if progress >= next_post:
-            print("Epoch {} progress: [{:<5d} / {:<5d} ({:3.0f}%)]".format(
-                epoch, i, len(train_loader), progress))
-            next_post = next_post + 20.0
-
-    print("[{}, {}] Mean loss: {:2.4f}  Mean Acc: {:2.3f}%".format(
-        epoch, i, total_loss / count, total_correct / total_seen * 1e2))
-
-
-def eval_epoch(epoch, model_fn, d_loader):
-    model.eval()
-    num_points = 2**7
-    losses, accuracies = [], []
-    while num_points <= 2**11:
-        d_loader.dataset.set_num_points(num_points)
-        total_correct = 0.0
-        total_seen = 0.0
-        total_loss = 0.0
-        for i, data in enumerate(d_loader, 0):
-            inputs, labels = data
-            inputs, labels = Variable(inputs.cuda()), Variable(labels.squeeze().cuda())
-
-            model.zero_grad()
-            loss, preds = model_fn(model, inputs, labels)
-
-            _, classes = torch.max(preds.data, 1)
-            total_correct += (classes == labels.data).sum()
-            total_seen += inputs.size(0)
-            total_loss += loss.data[0]
-
-        print("[{}, {}] Eval Loss: {:2.4f}\tEval Accuracy: {:2.3f}%".format(
-            epoch, num_points, total_loss / len(d_loader), total_correct / total_seen * 1e2))
-        num_points *= 2
-
-        accuracies.append(total_correct / total_seen)
-        losses.append(total_loss / len(d_loader))
-
-    return np.mean(accuracies), np.mean(losses)
-
+bnm_clip = 1e-2
 
 if __name__ == "__main__":
-    train()
-    eval_epoch(-1, model_fn, test_loader)
+    args = parser.parse_args()
+
+    BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+
+    transforms = transforms.Compose([
+        d_utils.PointcloudToTensor(),
+        d_utils.PointcloudRotate(x_axis=True),
+        d_utils.PointcloudScale(),
+        d_utils.PointcloudTranslate(),
+        d_utils.PointcloudJitter()
+    ])
+
+    test_set = ModelNet40Cls(
+        args.num_points, BASE_DIR, transforms=transforms, train=False)
+    test_loader = DataLoader(
+        test_set,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=True)
+
+    train_set = ModelNet40Cls(args.num_points, BASE_DIR, transforms=transforms)
+    train_loader = DataLoader(
+        train_set,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=True)
+
+    tb_log.configure('runs/{}'.format(args.run_name))
+
+    model = Pointnet()
+    model.cuda()
+    optimizer = optim.Adam(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    lr_lbmd = lambda e: max(args.lr_decay**(e // args.decay_step), lr_clip / args.lr)
+    bn_lbmd = lambda e: max(args.bn_momentum * args.bnm_decay**(e // args.decay_step), bnm_clip)
+
+    if args.checkpoint is not None:
+        start_epoch, best_prec = pt_utils.load_checkpoint(
+            model, optimizer, filename=args.checkpoint.split(".")[0])
+
+        lr_scheduler = lr_sched.LambdaLR(
+            optimizer, lr_lambda=lr_lbmd, last_epoch=start_epoch)
+        bnm_scheduler = pt_utils.BNMomentumScheduler(
+            model, bn_lambda=bn_lbmd, last_epoch=start_epoch)
+    else:
+        lr_scheduler = lr_sched.LambdaLR(optimizer, lr_lambda=lr_lbmd)
+        bnm_scheduler = pt_utils.BNMomentumScheduler(model, bn_lambda=bn_lbmd)
+
+        best_prec = 0.0
+        start_epoch = 1
+
+    model_fn = model_fn_decorator(nn.CrossEntropyLoss())
+
+    trainer = pt_utils.Trainer(
+        model,
+        model_fn,
+        optimizer,
+        checkpoint_name="cls_checkpoint",
+        best_name="cls_best",
+        lr_scheduler=lr_scheduler,
+        bnm_scheduler=bnm_scheduler)
+
+    trainer.train(
+        start_epoch,
+        args.epochs,
+        test_loader,
+        train_loader,
+        best_prec=best_prec)
+
+    if epoch_start == args.epochs:
+        _ = trainer.eval_epoch(start_epoch, test_loader)

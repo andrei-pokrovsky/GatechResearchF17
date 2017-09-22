@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd import Variable
 
 import os, sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -8,6 +9,35 @@ sys.path.append(BASE_DIR)
 
 import pytorch_utils as pt_utils
 from TransformNets import TransformNet, TranslationNet
+
+
+def model_fn_decorator(criterion):
+    transform_reg = 1e-3
+
+    def ortho_loss(matrix):
+        return torch.dist(
+            matrix.bmm(matrix.transpose(1, 2)),
+            Variable(
+                torch.eye(matrix.size(1), matrix.size(2)).type(
+                    torch.cuda.FloatTensor)))
+
+    def wrapped(model, inputs, labels):
+        labels = labels.squeeze()
+        preds, end_points = model(inputs)
+
+        transform_loss = 0.0
+        for _, T in end_points.items():
+            transform_loss += ortho_loss(T)
+
+        preds_loss = criterion(preds, labels)
+        loss = preds_loss + transform_reg * transform_loss
+
+        _, classes = torch.max(preds, 1)
+        acc = (classes == labels).sum()
+
+        return preds, loss, acc.data[0]
+
+    return wrapped
 
 
 class Pointnet(nn.Module):
