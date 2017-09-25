@@ -8,9 +8,11 @@ sys.path.append(BASE_DIR)
 
 import pytorch_utils as pt_utils
 from TransformNets import TransformNet
+from collections import namedtuple
 
 
 def model_fn_decorator(criterion):
+    ModelReturn = namedtuple("ModelReturn", ['preds', 'loss', 'acc'])
     def model_fn(model, inputs, labels):
         preds = model(inputs)
         loss = criterion(preds.view(labels.numel(), -1), labels.view(-1))
@@ -18,7 +20,7 @@ def model_fn_decorator(criterion):
         _, classes = torch.max(preds.data, 2)
         acc = (classes == labels.data).sum()
 
-        return preds, loss, acc
+        return ModelReturn(preds, loss, acc)
 
     return model_fn
 

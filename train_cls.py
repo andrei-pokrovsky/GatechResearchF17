@@ -12,8 +12,8 @@ import tensorboard_logger as tb_log
 from models.PointnetCLS import Pointnet
 from models.PointnetCLS import model_fn_decorator
 from data.ModelNet40Loader import ModelNet40Cls
-import models.pytorch_utils as pt_utils
-import data.data_utils as d_utils
+import utils.pytorch_utils as pt_utils
+import utils.data_utils as d_utils
 import argparse
 
 parser = argparse.ArgumentParser(description="Arg parser")
@@ -136,5 +136,5 @@ if __name__ == "__main__":
         train_loader,
         best_prec=best_prec)
 
-    if epoch_start == args.epochs:
+    if start_epoch == args.epochs:
         _ = trainer.eval_epoch(start_epoch, test_loader)
