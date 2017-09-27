@@ -10,7 +10,7 @@ NVCC_FLAGS := -x cu -Xcompiler -fPIC -shared -O2
 BUILD_DIR := build
 INCLUDE_DIRS := cinclude
 TORCH_FFI_BUILD := build_ffi.py
-POINTNET2_KERNELS := $(BUILD_DIR)/ball_query_gpu.so $(BUILD_DIR)/group_points_gpu.so $(BUILD_DIR)/gather_points_gpu.so $(BUILD_DIR)/interpolate_gpu.so
+POINTNET2_KERNELS := $(BUILD_DIR)/ball_query_gpu.so $(BUILD_DIR)/group_points_gpu.so $(BUILD_DIR)/sampling_gpu.so $(BUILD_DIR)/interpolate_gpu.so
 TORCH_FFI_TARGET := $(BUILD_DIR)/pointnet2/_pointnet2.so
 
 INCLUDE_FLAGS := $(foreach d, $(INCLUDE_DIRS), -I$d)

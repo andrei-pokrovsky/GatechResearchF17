@@ -76,7 +76,7 @@ if __name__ == "__main__":
     import numpy as np
     import torch.optim as optim
     B = 32
-    N = 2048
+    N = 10
     inputs = Variable(torch.randn(B, N, 9).cuda())
     labels = Variable(
         torch.from_numpy(np.random.randint(0, 3, size=B * N)).view(B, N)

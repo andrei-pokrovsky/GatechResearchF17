@@ -2,12 +2,15 @@
 #include <stdlib.h>
 
 #include "group_points_gpu.h"
+#include "cuda_utils.h"
 
 // input: points(b, n, c) idx(b, npoints, nsample)
 // output: out(b, npoints, nsample, c)
 __global__ void group_points_kernel(int b, int n, int c, int npoints,
-				    int nsample, const float *points,
-				    const int *idx, float *out) {
+				    int nsample,
+				    const float  *__restrict__ points,
+				    const int  *__restrict__ idx,
+				    float  *__restrict__ out) {
 	int batch_index = blockIdx.x;
 	points += batch_index * n * c;
 	idx += batch_index * npoints * nsample;
@@ -29,8 +32,8 @@ void group_points_kernel_wrapper(int b, int n, int c, int npoints, int nsample,
 				 float *out, cudaStream_t stream) {
 
 	cudaError_t err;
-	group_points_kernel<<<b, min(512, npoints), 0, stream>>>(b, n, c, npoints, nsample,
-						   points, idx, out);
+	group_points_kernel<<<b, opt_n_threads(npoints), 0, stream>>>(
+	    b, n, c, npoints, nsample, points, idx, out);
 
 	err = cudaGetLastError();
 	if (cudaSuccess != err) {
@@ -43,8 +46,10 @@ void group_points_kernel_wrapper(int b, int n, int c, int npoints, int nsample,
 // input: grad_out(b, npoints, nsample, c), idx(b, npoints, nsample)
 // output: grad_points(b, n, c)
 __global__ void group_points_grad_kernel(int b, int n, int c, int npoints,
-					 int nsample, const float *grad_out,
-					 const int *idx, float *grad_points) {
+					 int nsample,
+					 const float  *__restrict__ grad_out,
+					 const int  *__restrict__ idx,
+					 float  *__restrict__ grad_points) {
 	int batch_index = blockIdx.x;
 	grad_points += batch_index * n * c;
 	idx += batch_index * npoints * nsample;
@@ -69,7 +74,7 @@ void group_points_grad_kernel_wrapper(int b, int n, int c, int npoints,
 				      const int *idx, float *grad_points,
 				      cudaStream_t stream) {
 	cudaError_t err;
-	group_points_grad_kernel<<<b, min(512, npoints), 0, stream>>>(
+	group_points_grad_kernel<<<b, opt_n_threads(npoints), 0, stream>>>(
 	    b, n, c, npoints, nsample, grad_out, idx, grad_points);
 
 	err = cudaGetLastError();

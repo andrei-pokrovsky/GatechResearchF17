@@ -3,11 +3,15 @@
 #include <stdlib.h>
 
 #include "interpolate_gpu.h"
+#include "cuda_utils.h"
 
 // input: unknown(b, n, 3) known(b, m, 3)
 // output: dist2(b, n, 3), idx(b, n, 3)
-__global__ void three_nn_kernel(int b, int n, int m, const float *unknown,
-				const float *known, float *dist2, int *idx) {
+__global__ void three_nn_kernel(int b, int n, int m,
+				const float *__restrict__ unknown,
+				const float *__restrict__ known,
+				float *__restrict__ dist2,
+				int *__restrict__ idx) {
     int batch_index = blockIdx.x;
     unknown += batch_index * n * 3;
     known += batch_index * m * 3;
@@ -61,8 +65,8 @@ void three_nn_kernel_wrapper(int b, int n, int m, const float *unknown,
 			     cudaStream_t stream) {
 
     cudaError_t err;
-    three_nn_kernel<<<b, min(n, 512), 0, stream>>>(b, n, m, unknown, known,
-						   dist2, idx);
+    three_nn_kernel<<<b, opt_n_threads(n), 0, stream>>>(b, n, m, unknown, known,
+							dist2, idx);
 
     err = cudaGetLastError();
     if (cudaSuccess != err) {
@@ -76,8 +80,10 @@ void three_nn_kernel_wrapper(int b, int n, int m, const float *unknown,
 // input: points(b, m, c), idx(b, n, 3), weight(b, n, 3)
 // output: out(b, n, c)
 __global__ void three_interpolate_kernel(int b, int m, int c, int n,
-					 const float *points, const int *idx,
-					 const float *weight, float *out) {
+					 const float *__restrict__ points,
+					 const int *__restrict__ idx,
+					 const float *__restrict__ weight,
+					 float *__restrict__ out) {
     int batch_index = blockIdx.x;
     points += batch_index * m * c;
 
@@ -110,8 +116,8 @@ void three_interpolate_kernel_wrapper(int b, int m, int c, int n,
 				      cudaStream_t stream) {
 
     cudaError_t err;
-    three_interpolate_kernel<<<b, min(n, 512), 0, stream>>>(b, m, c, n, points,
-							    idx, weight, out);
+    three_interpolate_kernel<<<b, opt_n_threads(n) / 4, 0, stream>>>(
+	b, m, c, n, points, idx, weight, out);
 
     err = cudaGetLastError();
     if (cudaSuccess != err) {
@@ -125,11 +131,10 @@ void three_interpolate_kernel_wrapper(int b, int m, int c, int n,
 // input: grad_out(b, n, c), idx(b, n, 3), weight(b, n, 3)
 // output: grad_points(b, m, c)
 
-__global__ void three_interpolate_grad_kernel(int b, int n, int c, int m,
-					      const float *grad_out,
-					      const int *idx,
-					      const float *weight,
-					      float *grad_points) {
+__global__ void three_interpolate_grad_kernel(
+    int b, int n, int c, int m, const float *__restrict__ grad_out,
+    const int *__restrict__ idx, const float *__restrict__ weight,
+    float *__restrict__ grad_points) {
     int batch_index = blockIdx.x;
     grad_out += batch_index * n * c;
     idx += batch_index * n * 3;
@@ -162,7 +167,7 @@ void three_interpolate_grad_kernel_wrapper(int b, int n, int c, int m,
 					   cudaStream_t stream) {
 
     cudaError_t err;
-    three_interpolate_grad_kernel<<<b, min(n, 512), 0, stream>>>(
+    three_interpolate_grad_kernel<<<b, opt_n_threads(n) / 4, 0, stream>>>(
 	b, n, c, m, grad_out, idx, weight, grad_points);
 
     err = cudaGetLastError();

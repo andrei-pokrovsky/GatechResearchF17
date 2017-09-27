@@ -25,32 +25,22 @@ class FurthestPointSampling(Function):
 
         Returns
         torch.Tensor
-            (B, npoint, 3) tensor containing the set
+            (B, npoint) tensor containing the set
         ------
         """
         B, N, _ = xyz.size()
 
-        output = torch.cuda.FloatTensor(npoint, B, 3)
-        output[0].copy_(xyz[:, 0])
+        output = torch.cuda.IntTensor(B, npoint)
+        temp = torch.cuda.FloatTensor(B, N)
 
-        idx = torch.cuda.LongTensor(B)
-        scratch = torch.cuda.FloatTensor(B)
+        xyz = xyz.contiguous()
+        temp = temp.contiguous()
+        output = output.contiguous()
 
-        distance_to_closet_in_set = torch.cuda.FloatTensor(B, N).fill_(1e38)
-        scratch2 = torch.cuda.FloatTensor(B, N)
+        pointnet2.furthest_point_sampling_wrapper(B, N, npoint, xyz, temp, output)
 
-        all_b = torch.cuda.LongTensor([b for b in range(B)])
 
-        for current_n in range(1, npoint):
-            torch.min(
-                distance_to_closet_in_set,
-                pdist2(xyz, output[current_n - 1]),
-                out=scratch2)
-            distance_to_closet_in_set.copy_(scratch2)
-            torch.max(distance_to_closet_in_set, dim=1, out=(scratch, idx))
-            output[current_n].copy_(xyz[all_b, idx])
-
-        return output.transpose(0, 1).contiguous()
+        return output
 
     @staticmethod
     def backward(xyz, a=None):
@@ -59,6 +49,46 @@ class FurthestPointSampling(Function):
 
 furthest_point_sample = FurthestPointSampling.apply
 
+
+class GatherPoints(Function):
+    @staticmethod
+    def forward(ctx, points: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+        r"""
+        Uses iterative furthest point sampling to select a set of npoint points that have the largest
+        minimum distance
+
+        Parameters
+        ---------
+        points : torch.Tensor
+            (B, N, 3) tensor
+
+        idx : torch.Tensor
+            (B, npoint) tensor of the points to gather
+
+        Returns
+        torch.Tensor
+            (B, npoint, 3) tensor
+        ------
+        """
+
+        B, N, C = points.size()
+        npoint = idx.size(1)
+
+        output = torch.cuda.FloatTensor(B, npoint, C)
+
+        points = points.contiguous()
+        idx = idx.contiguous()
+        output = output.contiguous()
+
+        pointnet2.gather_points_wrapper(B, N, C, npoint, points, idx, output)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, a=None):
+        return None, None
+
+gather_points = GatherPoints.apply
 
 class ThreeNN(Function):
     @staticmethod
@@ -317,7 +347,7 @@ class SampleAndGroup(nn.Module):
         new_points : torch.Tensor
             (B, npoint, nsample, 3 + C) tensor
         """
-        new_xyz = furthest_point_sample(xyz, self.npoint)  # (B, npoint, 3)
+        new_xyz = gather_points(xyz, furthest_point_sample(xyz, self.npoint))  # (B, npoint, 3)
 
         idx = ball_query(self.radius, self.nsample, xyz, new_xyz)
         grouped_xyz = group_points(xyz, idx)  # (B, npoint, nsample, 3)
@@ -461,19 +491,19 @@ if __name__ == "__main__":
     xyz = Variable(torch.randn(2, 10, 3).cuda(), requires_grad=True)
     xyz_feats = Variable(torch.randn(2, 2, 6).cuda(), requires_grad=True)
 
-    test_module = PointnetSAModule(1, radius=10.0, nsample=3, mlp=[3, 3])
-    test_module.cuda()
-    print(test_module(xyz))
-
-    #  test_module = PointnetFPModule(mlp=[6, 6])
+    #  test_module = PointnetSAModule(1, radius=10.0, nsample=3, mlp=[3, 3])
     #  test_module.cuda()
+    #  print(test_module(xyz))
+
+    test_module = PointnetFPModule(mlp=[6, 6])
+    test_module.cuda()
     #  from torch.autograd import gradcheck
     #  inputs = (xyz, xyz, None, xyz_feats)
     #  test = gradcheck(test_module, inputs, eps=1e-6, atol=1e-4)
     #  print(test)
 
     for _ in range(1):
-        _, new_points = test_module(xyz)
+        _, new_points = test_module(xyz, xyz, None, xyz_feats)
         new_points.backward(
             torch.cuda.FloatTensor(*new_points.size()).fill_(1))
         print(new_points)
