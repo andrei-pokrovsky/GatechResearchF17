@@ -78,7 +78,6 @@ class Conv1d(_ConvBase):
             batch_norm=nn.BatchNorm1d)
 
 
-
 class Conv2d(_ConvBase):
     def __init__(self,
                  in_size,
@@ -148,6 +147,17 @@ class FC(nn.Sequential):
             self.add_module('activation', activation)
 
 
+class RandomDropout1d(nn.Module):
+    def __init__(self, p=0.5):
+        super().__init__()
+        self.p = p
+
+    def forward(self, X):
+        theta = np.random.uniform(low=0.0, high=self.p)
+        return torch.nn.functional.dropout2d(
+            X.unsqueeze(1), p=theta, training=self.training).squeeze(1)
+
+
 def checkpoint_state(model, optimizer, best_prec, epoch):
     return {
         'epoch': epoch,
@@ -183,14 +193,26 @@ def load_checkpoint(model, optimizer, filename='checkpoint'):
     return epoch, best_prec
 
 
-class BNMomentumScheduler(object):
-    def __init__(self, model, bn_lambda, last_epoch=-1):
-        self.model = model
+def set_bn_momentum_default(bn_momentum):
+    def fn(m):
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            m.momentum = bn_momentum
 
-        if not callable(getattr(self.model, "set_bn_momentum")):
-            raise KeyError(
-                "Class '{}' has no method 'set_bn_momentum(bn_momentum)'".
-                format(type(model).__name__))
+    return fn
+
+
+class BNMomentumScheduler(object):
+    def __init__(self,
+                 model,
+                 bn_lambda,
+                 last_epoch=-1,
+                 setter=set_bn_momentum_default):
+        self.model = model
+        self.setter = setter
+
+        if not isinstance(model, nn.Module):
+            raise RuntimeError("Class '{}' is not a PyTorch nn Module".format(
+                type(model).__name__))
 
         self.lmbd = bn_lambda
 
@@ -202,10 +224,32 @@ class BNMomentumScheduler(object):
             epoch = self.last_epoch + 1
 
         self.last_epoch = epoch
-        self.model.set_bn_momentum(self.lmbd(epoch))
+        self.model.apply(self.setter(self.lmbd(epoch)))
 
 
 class Trainer(object):
+    r"""
+        Reasonably generic trainer for pytorch models
+
+    Parameters
+    ----------
+    model : pytorch model
+        Model to be trained
+    model_fn : function (model, inputs, labels) -> preds, loss, accuracy
+    optimizer : torch.optim
+        Optimizer for model
+    checkpoint_name : str
+        Name of file to save checkpoints to
+    best_name : str
+        Name of file to save best model to
+    lr_scheduler : torch.optim.lr_scheduler
+        Learning rate scheduler.  .step() will be called at the start of every epoch
+    bnm_scheduler : BNMomentumScheduler
+        Batchnorm momentum scheduler.  .step() will be called at the start of every epoch
+    eval_frequency : int
+        How often to run an eval
+    """
+
     def __init__(self,
                  model,
                  model_fn,
@@ -213,11 +257,13 @@ class Trainer(object):
                  checkpoint_name="ckpt",
                  best_name="best",
                  lr_scheduler=None,
-                 bnm_scheduler=None):
+                 bnm_scheduler=None,
+                 eval_frequency=1):
         self.model, self.model_fn, self.optimizer, self.lr_scheduler, self.bnm_scheduler = (
             model, model_fn, optimizer, lr_scheduler, bnm_scheduler)
 
         self.checkpoint_name, self.best_name = checkpoint_name, best_name
+        self.eval_frequency = eval_frequency
 
     def _train_epoch(self, epoch, d_loader):
         self.model.train()
@@ -258,8 +304,11 @@ class Trainer(object):
             epoch, total_loss / count, total_correct / total_seen * 1e2))
 
     def eval_epoch(self, epoch, d_loader):
+        if d_loader is None:
+            return
+
         self.model.eval()
-        num_points = 2**7
+        num_points = 2**8
         accuracy = []
         losses = []
         while num_points <= 2**12:
@@ -299,6 +348,22 @@ class Trainer(object):
               test_loader,
               train_loader,
               best_prec=0.0):
+        r"""
+           Call to begin training the model
+
+        Parameters
+        ----------
+        start_epoch : int
+            Epoch to start at
+        n_epochs : int
+            Number of epochs to train for
+        test_loader : torch.utils.data.DataLoader
+            DataLoader of the test_data
+        train_loader : torch.utils.data.DataLoader
+            DataLoader of training data
+        best_prec : float
+            Testing accuracy of the best model
+        """
         for epoch in range(start_epoch, n_epochs + 1):
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
@@ -309,17 +374,25 @@ class Trainer(object):
             print("{0}TRAIN{0}".format("-" * 5))
             self._train_epoch(epoch, train_loader)
 
-            print("{0}EVAL{0}".format("-" * 5))
-            val_prec, val_loss = self.eval_epoch(epoch, test_loader)
-            tb_log.log_value('Validation error', 1.0 - val_prec, epoch)
-            tb_log.log_value('Validation loss', val_loss, epoch)
+            if test_loader is not None:
+                old_precent = test_loader.dataset.data_precent
+                if epoch % self.eval_frequency == 0:
+                    test_loader.dataset.data_precent = 1.0
 
-            is_best = val_prec > best_prec
-            best_prec = max(val_prec, best_prec)
-            save_checkpoint(
-                checkpoint_state(self.model, self.optimizer, best_prec, epoch),
-                is_best,
-                filename=self.checkpoint_name,
-                bestname=self.best_name)
+                print("{0}EVAL{0}".format("-" * 5))
+                val_prec, val_loss = self.eval_epoch(epoch, test_loader)
+                tb_log.log_value('Validation error', 1.0 - val_prec, epoch - 1)
+                tb_log.log_value('Validation loss', val_loss, epoch - 1)
+
+                is_best = val_prec > best_prec
+                best_prec = max(val_prec, best_prec)
+                save_checkpoint(
+                    checkpoint_state(self.model, self.optimizer, best_prec,
+                                     epoch),
+                    is_best,
+                    filename=self.checkpoint_name,
+                    bestname=self.best_name)
+
+                test_loader.dataset.data_precent = old_precent
 
         return best_prec

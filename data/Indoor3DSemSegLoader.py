@@ -6,8 +6,10 @@ import os, sys, h5py, subprocess, shlex
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(BASE_DIR)
 
+
 def _get_data_files(list_filename):
     return [line.rstrip() for line in open(list_filename)]
+
 
 def _load_data_file(name):
     f = h5py.File(name)
@@ -17,8 +19,14 @@ def _load_data_file(name):
 
 
 class Indoor3DSemSeg(data.Dataset):
-    def __init__(self, num_points, root, train=True, download=True):
+    def __init__(self,
+                 num_points,
+                 root,
+                 train=True,
+                 download=True,
+                 data_precent=1.0):
         super().__init__()
+        self.data_precent = data_precent
         root = os.path.abspath(root)
         self.folder = "indoor3d_sem_seg_hdf5_data"
         self.data_dir = os.path.join(root, self.folder)
@@ -30,14 +38,16 @@ class Indoor3DSemSeg(data.Dataset):
             subprocess.check_call(shlex.split("wget {}".format(self.url)))
             subprocess.check_call(shlex.split("unzip {}".format(zipfile)))
             if os.path.dirname(os.path.abspath(__file__)) != root:
-                subprocess.check_call(shlex.shlex("mv {} {}".format(zipfile[:-4], root)))
+                subprocess.check_call(
+                    shlex.shlex("mv {} {}".format(zipfile[:-4], root)))
             subprocess.check_call(shlex.split("rm {}".format(zipfile)))
-
 
         self.train, self.num_points = train, num_points
 
-        all_files = _get_data_files(os.path.join(self.data_dir, "all_files.txt"))
-        room_filelist = _get_data_files(os.path.join(self.data_dir, "room_filelist.txt"))
+        all_files = _get_data_files(
+            os.path.join(self.data_dir, "all_files.txt"))
+        room_filelist = _get_data_files(
+            os.path.join(self.data_dir, "room_filelist.txt"))
 
         data_batchlist, label_batchlist = [], []
         for f in all_files:
@@ -63,7 +73,6 @@ class Indoor3DSemSeg(data.Dataset):
             self.points = data_batches[test_idxs, ...]
             self.labels = labels_batches[test_idxs, ...]
 
-
     def __getitem__(self, idx):
         pt_idxs = np.arange(0, self.num_points)
         np.random.shuffle(pt_idxs)
@@ -73,19 +82,16 @@ class Indoor3DSemSeg(data.Dataset):
         current_labels = torch.from_numpy(self.labels[idx, pt_idxs]).type(
             torch.LongTensor)
 
-
         return current_points, current_labels
 
     def __len__(self):
-        return self.points.shape[0]
+        return int(self.points.shape[0] * self.data_precent)
 
     def set_num_points(self, pts):
         self.num_points = pts
 
     def randomize(self):
         pass
-
-
 
 
 if __name__ == "__main__":

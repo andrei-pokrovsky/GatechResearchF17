@@ -6,11 +6,11 @@ extern THCState *state;
 
 int group_points_wrapper(int b, int n, int c, int npoints, int nsample,
 			 THCudaTensor *points_tensor,
-			 THCudaLongTensor *idx_tensor,
+			 THCudaIntTensor *idx_tensor,
 			 THCudaTensor *out_tensor) {
 
 	const float *points = THCudaTensor_data(state, points_tensor);
-	const long *idx = THCudaLongTensor_data(state, idx_tensor);
+	const int *idx = THCudaIntTensor_data(state, idx_tensor);
 	float *out = THCudaTensor_data(state, out_tensor);
 
 	cudaStream_t stream = THCState_getCurrentStream(state);
@@ -22,11 +22,11 @@ int group_points_wrapper(int b, int n, int c, int npoints, int nsample,
 
 int group_points_grad_wrapper(int b, int n, int c, int npoints, int nsample,
 			      THCudaTensor *grad_out_tensor,
-			      THCudaLongTensor *idx_tensor,
+			      THCudaIntTensor *idx_tensor,
 			      THCudaTensor *grad_points_tensor) {
 
 	float *grad_points = THCudaTensor_data(state, grad_points_tensor);
-	const long *idx = THCudaLongTensor_data(state, idx_tensor);
+	const int *idx = THCudaIntTensor_data(state, idx_tensor);
 	const float *grad_out = THCudaTensor_data(state, grad_out_tensor);
 
 	cudaStream_t stream = THCState_getCurrentStream(state);

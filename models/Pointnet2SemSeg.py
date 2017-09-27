@@ -31,9 +31,10 @@ def model_fn_decorator(criterion):
     return model_fn
 
 
-class Pointnet2(nn.Module):
+class Pointnet2SSG(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
+
         self.SA_module0 = PointnetSAModule(1024, 0.1, 32, mlp=[9, 32, 32, 64])
         self.SA_module1 = PointnetSAModule(
             256, 0.2, 32, mlp=[64 + 3, 64, 64, 128])
@@ -47,12 +48,9 @@ class Pointnet2(nn.Module):
         self.FP_module2 = PointnetFPModule(mlp=[256 + 64, 256, 128])
         self.FP_module3 = PointnetFPModule(mlp=[128 + 6, 128, 128, 128])
 
-        self.FC_1 = pt_utils.Conv1d(128, 128, bn=True)
-        self.dropout = nn.Dropout()
-        self.FC_2 = pt_utils.Conv1d(128, num_classes, activation=None)
         self.FC_layer = nn.Sequential(
-            pt_utils.Conv1d(128, 128, bn=True),
-            nn.Dropout(), pt_utils.Conv1d(128, num_classes, activation=None))
+            pt_utils.Conv1d(128, 128, bn=True), nn.Dropout(),
+            pt_utils.Conv1d(128, num_classes, activation=None))
 
     def forward(self, xyz, points=None):
         l0_xyz = xyz
@@ -71,33 +69,27 @@ class Pointnet2(nn.Module):
 
         return self.FC_layer(l0_points).transpose(1, 2).contiguous()
 
-    def set_bn_momentum(self, bn_momentum):
-        def fn(m):
-            if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-                m.momentum = bn_momentum
-
-        self.apply(fn)
 
 
 if __name__ == "__main__":
     from torch.autograd import Variable
     import numpy as np
     import torch.optim as optim
-    B = 64
-    N = 1024
+    B = 32
+    N = 2048
     inputs = Variable(torch.randn(B, N, 9).cuda())
     labels = Variable(
         torch.from_numpy(np.random.randint(0, 3, size=B * N)).view(B, N)
         .cuda())
-    model = Pointnet2(3)
+    model = Pointnet2SSG(3)
     model.cuda()
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-1)
+    optimizer = optim.Adam(model.parameters(), lr=1e-5)
 
     model_fn = model_fn_decorator(nn.CrossEntropyLoss())
     for _ in range(20):
         optimizer.zero_grad()
         _, loss, _ = model_fn(model, inputs, labels)
         loss.backward()
-        print(loss)
+        print(loss.data[0])
         optimizer.step()

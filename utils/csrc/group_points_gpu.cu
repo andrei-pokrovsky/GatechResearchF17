@@ -7,7 +7,7 @@
 // output: out(b, npoints, nsample, c)
 __global__ void group_points_kernel(int b, int n, int c, int npoints,
 				    int nsample, const float *points,
-				    const long *idx, float *out) {
+				    const int *idx, float *out) {
 	int batch_index = blockIdx.x;
 	points += batch_index * n * c;
 	idx += batch_index * npoints * nsample;
@@ -18,20 +18,18 @@ __global__ void group_points_kernel(int b, int n, int c, int npoints,
 	for (int j = index; j < npoints; j += stride) {
 		for (int k = 0; k < nsample; ++k) {
 			int ii = idx[j * nsample + k];
-			for (int l = 0; l < c; ++l) {
-				out[j * nsample * c + k * c + l] =
-				    points[ii * c + l];
-			}
+			memcpy(out + j * nsample * c + k * c, points + ii * c,
+			       sizeof(float) * c);
 		}
 	}
 }
 
 void group_points_kernel_wrapper(int b, int n, int c, int npoints, int nsample,
-				 const float *points, const long *idx,
+				 const float *points, const int *idx,
 				 float *out, cudaStream_t stream) {
 
 	cudaError_t err;
-	group_points_kernel<<<b, 256, 0, stream>>>(b, n, c, npoints, nsample,
+	group_points_kernel<<<b, min(512, npoints), 0, stream>>>(b, n, c, npoints, nsample,
 						   points, idx, out);
 
 	err = cudaGetLastError();
@@ -46,7 +44,7 @@ void group_points_kernel_wrapper(int b, int n, int c, int npoints, int nsample,
 // output: grad_points(b, n, c)
 __global__ void group_points_grad_kernel(int b, int n, int c, int npoints,
 					 int nsample, const float *grad_out,
-					 const long *idx, float *grad_points) {
+					 const int *idx, float *grad_points) {
 	int batch_index = blockIdx.x;
 	grad_points += batch_index * n * c;
 	idx += batch_index * npoints * nsample;
@@ -59,7 +57,7 @@ __global__ void group_points_grad_kernel(int b, int n, int c, int npoints,
 			int ii = idx[j * nsample + k];
 			for (int l = 0; l < c; ++l) {
 				atomicAdd(
-				    grad_points + ii*c + l,
+				    grad_points + ii * c + l,
 				    grad_out[j * nsample * c + k * c + l]);
 			}
 		}
@@ -68,10 +66,10 @@ __global__ void group_points_grad_kernel(int b, int n, int c, int npoints,
 
 void group_points_grad_kernel_wrapper(int b, int n, int c, int npoints,
 				      int nsample, const float *grad_out,
-				      const long *idx, float *grad_points,
+				      const int *idx, float *grad_points,
 				      cudaStream_t stream) {
 	cudaError_t err;
-	group_points_grad_kernel<<<b, 256, 0, stream>>>(
+	group_points_grad_kernel<<<b, min(512, npoints), 0, stream>>>(
 	    b, n, c, npoints, nsample, grad_out, idx, grad_points);
 
 	err = cudaGetLastError();

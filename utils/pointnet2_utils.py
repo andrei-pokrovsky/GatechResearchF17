@@ -3,81 +3,174 @@ from torch.autograd import Variable
 from torch.autograd import Function
 import torch.nn.functional as F
 import torch.nn as nn
-from linalg_utils import pdist2
+from linalg_utils import pdist2, PDist2Order
 from collections import namedtuple
 import pointnet2
 import pytorch_utils as pt_utils
 
 
-def furthest_point_sample(xyz: torch.Tensor,
-                          npoint: int,
-                          dmat: torch.Tensor = None) -> torch.Tensor:
-    r"""
-    Uses iterative furthest point sampling to select a set of npoint points that have the largest
-    minimum distance
+class FurthestPointSampling(Function):
+    @staticmethod
+    def forward(ctx, xyz: torch.Tensor, npoint: int) -> torch.Tensor:
+        r"""
+        Uses iterative furthest point sampling to select a set of npoint points that have the largest
+        minimum distance
 
-    Parameters
-    ---------
-    xyz : torch.Tensor
-        (B, N, 3) tensor where N > npoint
-    npoint : int32
-        number of points in the sampled set
-    dmat : torch.Tensor
-        (B, N, N) tensor where dmat[b, i, j] = torch.dist(xyz[b, i], xyz[b, j], p=2)
-        If it is none, it will be calculated
+        Parameters
+        ---------
+        xyz : torch.Tensor
+            (B, N, 3) tensor where N > npoint
+        npoint : int32
+            number of points in the sampled set
 
-    Returns
-    torch.Tensor
-        (B, npoint) tensor containing the set
-    ------
-    """
-    B, N, _ = xyz.size()
-    if dmat is None: dmat = pdist2(xyz.data)
+        Returns
+        torch.Tensor
+            (B, npoint, 3) tensor containing the set
+        ------
+        """
+        B, N, _ = xyz.size()
 
-    _, furthest = torch.max(dmat.view(B, -1), dim=1)
+        output = torch.cuda.FloatTensor(npoint, B, 3)
+        output[0].copy_(xyz[:, 0])
 
-    j_0 = (furthest / N)
-    i_0 = (furthest % N)
+        idx = torch.cuda.LongTensor(B)
+        scratch = torch.cuda.FloatTensor(B)
 
-    output = torch.LongTensor(npoint, B).type_as(j_0)
-    all_b = torch.LongTensor([b for b in range(B)]).type_as(j_0)
+        distance_to_closet_in_set = torch.cuda.FloatTensor(B, N).fill_(1e38)
+        scratch2 = torch.cuda.FloatTensor(B, N)
 
-    output[0] = j_0
-    output[1] = i_0
+        all_b = torch.cuda.LongTensor([b for b in range(B)])
 
-    distance_to_closet_in_set = torch.min(dmat[all_b, i_0], dmat[all_b, j_0])
-    for current_n in range(2, npoint):
-        _, i = torch.max(distance_to_closet_in_set, dim=1)
-        output[current_n] = i
-        distance_to_closet_in_set = torch.min(distance_to_closet_in_set,
-                                              dmat[all_b, i])
+        for current_n in range(1, npoint):
+            torch.min(
+                distance_to_closet_in_set,
+                pdist2(xyz, output[current_n - 1]),
+                out=scratch2)
+            distance_to_closet_in_set.copy_(scratch2)
+            torch.max(distance_to_closet_in_set, dim=1, out=(scratch, idx))
+            output[current_n].copy_(xyz[all_b, idx])
 
-    return output.transpose_(0, 1)
+        return output.transpose(0, 1).contiguous()
+
+    @staticmethod
+    def backward(xyz, a=None):
+        return None, None
 
 
-def three_nn(unknown: torch.Tensor,
-             known: torch.Tensor) -> (torch.Tensor, torch.Tensor):
-    r"""
-        Find the three nearest neighbors of unknown in known
-    Parameters
-    ----------
-    unknown : torch.Tensor
-        (B, n, 3) tensor of known points
-    known : torch.Tensor
-        (B, m, 3) tensor of unknown points
+furthest_point_sample = FurthestPointSampling.apply
 
-    Returns
-    -------
-    dist : torch.Tensor
-        (B, n, 3) l2 distance to the three nearest neighbors
-    idx : torch.Tensor
-        (B, n, 3) index of 3 nearest neighbors
-    """
-    dmat = pdist2(unknown, known)
 
-    dist, idx = torch.sort(dmat, dim=2)
+class ThreeNN(Function):
+    @staticmethod
+    def forward(ctx, unknown: torch.Tensor,
+                known: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+        r"""
+            Find the three nearest neighbors of unknown in known
+        Parameters
+        ----------
+        unknown : torch.Tensor
+            (B, n, 3) tensor of known points
+        known : torch.Tensor
+            (B, m, 3) tensor of unknown points
 
-    return dist[..., :3], idx[..., :3]
+        Returns
+        -------
+        dist : torch.Tensor
+            (B, n, 3) l2 distance to the three nearest neighbors
+        idx : torch.Tensor
+            (B, n, 3) index of 3 nearest neighbors
+        """
+        B, N, _ = unknown.size()
+        m = known.size(1)
+        dist2 = torch.cuda.FloatTensor(B, N, 3)
+        idx = torch.cuda.IntTensor(B, N, 3)
+
+        unknown = unknown.contiguous()
+        known = known.contiguous()
+        dist2 = dist2.contiguous()
+        idx = idx.contiguous()
+        pointnet2.three_nn_wrapper(B, N, m, unknown, known, dist2, idx)
+
+        return torch.sqrt(dist2), idx
+
+    @staticmethod
+    def backward(ctx, a=None, b=None):
+        return None, None
+
+
+three_nn = ThreeNN.apply
+
+
+class ThreeInterpolate(Function):
+    @staticmethod
+    def forward(ctx, points: torch.Tensor, idx: torch.Tensor,
+                weight: torch.Tensor) -> torch.Tensor:
+        r"""
+            Performs weight linear interpolation on 3 points
+        Parameters
+        ----------
+        points : torch.Tensor
+            (B, m, c)  Points to be interpolated from
+        idx : torch.Tensor
+            (B, n, 3) three nearest neighbors of the target points in points
+        weight : torch.Tensor
+            (B, n, 3) weights
+
+        Returns
+        -------
+        torch.Tensor
+            (B, n, c) tensor of the interpolated points
+        """
+
+        B, m, c = points.size()
+        n = idx.size(1)
+
+        ctx.three_interpolate_for_backward = (idx, weight, m)
+
+        output = torch.cuda.FloatTensor(B, n, c)
+
+        points = points.contiguous()
+        idx = idx.contiguous()
+        weight = weight.contiguous()
+        output = output.contiguous()
+        pointnet2.three_interpolate_wrapper(B, m, c, n, points, idx, weight,
+                                            output)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_out: torch.Tensor
+                 ) -> (torch.Tensor, torch.Tensor, torch.Tensor):
+        r"""
+        Parameters
+        ----------
+        grad_out : torch.Tensor
+            (B, n, c) tensor with gradients of ouputs
+
+        Returns
+        -------
+        grad_points : torch.Tensor
+            (B, m, c) tensor with gradients of points
+        None
+
+        None
+        """
+        idx, weight, m = ctx.three_interpolate_for_backward
+        B, n, c = grad_out.size()
+
+        grad_points = Variable(torch.cuda.FloatTensor(B, m, c).zero_())
+
+        grad_out = grad_out.contiguous()
+        idx = idx.contiguous()
+        weight = weight.contiguous()
+        grad_points = grad_points.contiguous()
+        pointnet2.three_interpolate_grad_wrapper(B, n, c, m, grad_out.data,
+                                                 idx, weight, grad_points.data)
+
+        return grad_points, None, None
+
+
+three_interpolate = ThreeInterpolate.apply
 
 
 class GroupPoints(Function):
@@ -100,24 +193,41 @@ class GroupPoints(Function):
         B, npoints, nsample = idx.size()
         _, N, C = points.size()
 
-        ctx.idx_N_C_for_backward = (idx, N, C)
         output = torch.cuda.FloatTensor(B, npoints, nsample, C)
 
+        points = points.contiguous()
+        idx = idx.contiguous()
+        output = output.contiguous()
         pointnet2.group_points_wrapper(B, N, C, npoints, nsample, points, idx,
                                        output)
 
+        ctx.idx_N_C_for_backward = (idx, N, C)
         return output
 
     @staticmethod
-    def backward(ctx, grad_out: torch.Tensor) -> torch.Tensor:
+    def backward(ctx, grad_out: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+        r"""
+
+        Parameters
+        ----------
+        grad_out : torch.Tensor
+            (B, npoint, nsample, C) tensor of the gradients of the output from forward
+
+        Returns
+        -------
+        torch.Tensor
+            (B, N, C) gradient of the points
+        None
+        """
         idx, N, C = ctx.idx_N_C_for_backward
 
         B, npoint, nsample, _ = grad_out.size()
         grad_points = Variable(torch.cuda.FloatTensor(B, N, C).zero_())
 
-        pointnet2.group_points_grad_wrapper(B, N, C, npoint, nsample,
-                                            grad_out.data, idx,
-                                            grad_points.data)
+        grad_out = grad_out.contiguous()
+        grad_points = grad_points.contiguous()
+        pointnet2.group_points_grad_wrapper(
+            B, N, C, npoint, nsample, grad_out.data, idx, grad_points.data)
 
         return grad_points, None
 
@@ -125,59 +235,47 @@ class GroupPoints(Function):
 group_points = GroupPoints.apply
 
 
-def ball_query(radius: float,
-               nsample: int,
-               xyz: torch.Tensor,
-               new_xyz: torch.Tensor,
-               dmat: torch.Tensor = None) -> torch.Tensor:
-    r"""
+class BallQuery(Function):
+    @staticmethod
+    def forward(ctx, radius: float, nsample: int, xyz: torch.Tensor,
+                new_xyz: torch.Tensor) -> torch.Tensor:
+        r"""
 
-    Parameters
-    ---------
-    radius : float
-        radius of the balls
-    nsample : int
-        maximum number of points in the balls
-    xyz : torch.Tensor
-        (B, N, 3) xyz coordinates of the points
-    new_xyz : torch.Tensor
-        (B, npoint, 3) centers of the ball query
-    dmat : torch.Tensor
-        (B, npoint, N) tensor where dmat[b, i, j] = torch.dist(new_xyz[b, i], xyz[b, j], p=2)
-        If it is none, it will be calculated
+        Parameters
+        ---------
+        radius : float
+            radius of the balls
+        nsample : int
+            maximum number of points in the balls
+        xyz : torch.Tensor
+            (B, N, 3) xyz coordinates of the points
+        new_xyz : torch.Tensor
+            (B, npoint, 3) centers of the ball query
 
-    Returns
-    ------
-    torch.Tensor
-        (B, npoint, nsample) tensor with the indicies of the points that form the query balls
-    """
+        Returns
+        ------
+        torch.Tensor
+            (B, npoint, nsample) tensor with the indicies of the points that form the query balls
+        """
 
-    if dmat is None: dmat = pdist2(new_xyz, xyz)
+        B, N, _ = xyz.size()
+        npoint = new_xyz.size(1)
+        idx = torch.cuda.IntTensor(B, npoint, nsample).zero_()
 
-    B, N, _ = xyz.size()
-    npoint = new_xyz.size(1)
-    idx = torch.cuda.LongTensor(B, npoint, nsample)
-    pointnet2.ball_query_wrapper(B, N, npoint, radius, nsample, dmat, idx)
+        new_xyz = new_xyz.contiguous()
+        xyz = xyz.contiguous()
+        idx = idx.contiguous()
+        pointnet2.ball_query_wrapper(B, N, npoint, radius, nsample, new_xyz,
+                                     xyz, idx)
 
-    return idx
+        return idx
+
+    @staticmethod
+    def backward(ctx, a=None):
+        return None, None, None, None
 
 
-def gather_points(points: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-    r"""
-    Parameters
-    ----------
-    points : torch.Tensor
-        (B, N, C) tensor to gather from
-    idx : torch.Tensor
-        (B, npoint) tensor of the indicies to gather from points
-
-    Returns
-    -------
-    torch.Tensor
-        (B, npoint, C) tensor
-    """
-    idx = idx.unsqueeze(-1).repeat(1, 1, points.size(2))
-    return torch.gather(points, dim=1, index=idx)
+ball_query = BallQuery.apply
 
 
 class SampleAndGroup(nn.Module):
@@ -219,10 +317,9 @@ class SampleAndGroup(nn.Module):
         new_points : torch.Tensor
             (B, npoint, nsample, 3 + C) tensor
         """
-        new_xyz = gather_points(xyz, furthest_point_sample(
-            xyz, self.npoint))  # (B, npoint, 3)
+        new_xyz = furthest_point_sample(xyz, self.npoint)  # (B, npoint, 3)
 
-        idx = ball_query(self.radius, self.nsample, xyz.data, new_xyz.data)
+        idx = ball_query(self.radius, self.nsample, xyz, new_xyz)
         grouped_xyz = group_points(xyz, idx)  # (B, npoint, nsample, 3)
         grouped_xyz -= new_xyz.unsqueeze(2)
 
@@ -288,12 +385,14 @@ class PointnetSAModule(nn.Module):
 
         new_xyz, new_points = self.grouper(
             xyz, points)  # (B, npoint, 3), (B, npoint, nsample, 3 + C)
-        new_points = self.mlp(new_points.permute(0, 3, 1, 2))  # (B, mlp[-1], npoint, nsample)
+        new_points = self.mlp(new_points.permute(
+            0, 3, 1, 2))  # (B, mlp[-1], npoint, nsample)
         new_points = F.max_pool2d(
             new_points,
             kernel_size=[1, new_points.size(3)])  # (B, mlp[-1], npoint, 1)
         new_points = new_points.squeeze(-1)  # (B, mlp[-1], npoint)
-        new_points = new_points.transpose(1, 2)  # (B, npoint, mlp[-1])
+        new_points = new_points.transpose(
+            1, 2).contiguous()  # (B, npoint, mlp[-1])
 
         return new_xyz, new_points
 
@@ -337,33 +436,45 @@ class PointnetFPModule(nn.Module):
 
         dist, idx = three_nn(unknown, known)
         dist += 1e-10
-        norm = torch.sum(1.0 / dist, dim=2, keepdim=True)
-        weight = (1.0 / dist) / norm
+        dist_recip = 1.0 / dist
+        norm = torch.sum(dist_recip, dim=2, keepdim=True)
+        weight = dist_recip / norm
 
-        nn_1 = gather_points(known_feats, idx[..., 0])
-        nn_2 = gather_points(known_feats, idx[..., 1])
-        nn_3 = gather_points(known_feats, idx[..., 2])
-
-        interpolated_feats = nn_1 * weight[..., 0].unsqueeze(-1) + nn_2 * weight[..., 1].unsqueeze(-1) + nn_3 * weight[..., 2].unsqueeze(-1) # (B, n, C2)
-
+        interpolated_feats = three_interpolate(known_feats, idx, weight)
         if unknow_feats is not None:
-            new_points = torch.cat([interpolated_feats, unknow_feats], dim=-1) #(B, n, C2 + C1)
+            new_points = torch.cat(
+                [interpolated_feats, unknow_feats], dim=-1)  #(B, n, C2 + C1)
         else:
             new_points = interpolated_feats
 
-        new_points = new_points.unsqueeze(-1).transpose(1, 2) #(B, C2 + C1, n, 1)
+        new_points = new_points.unsqueeze(-1).transpose(1,
+                                                        2)  #(B, C2 + C1, n, 1)
         new_points = self.mlp(new_points)
 
-        return new_points.squeeze(-1).transpose(1, 2) #(B, n, mlp[-1])
+        return new_points.squeeze(-1).transpose(
+            1, 2).contiguous()  #(B, n, mlp[-1])
+
 
 if __name__ == "__main__":
     torch.manual_seed(1)
     torch.cuda.manual_seed_all(1)
-    xyz = Variable(torch.randn(3, 5, 3).cuda())
+    xyz = Variable(torch.randn(2, 10, 3).cuda(), requires_grad=True)
+    xyz_feats = Variable(torch.randn(2, 2, 6).cuda(), requires_grad=True)
 
-    test_module = PointnetFPModule(mlp=[6, 4, 5])
+    test_module = PointnetSAModule(1, radius=10.0, nsample=3, mlp=[3, 3])
     test_module.cuda()
-    print(test_module(xyz, xyz, xyz, xyz))
-    #  test_module = PointnetSAModule(3, 1.5, 2, mlp=[6, 4, 5, 6])
+    print(test_module(xyz))
+
+    #  test_module = PointnetFPModule(mlp=[6, 6])
     #  test_module.cuda()
-    #  print(test_module(xyz, xyz))
+    #  from torch.autograd import gradcheck
+    #  inputs = (xyz, xyz, None, xyz_feats)
+    #  test = gradcheck(test_module, inputs, eps=1e-6, atol=1e-4)
+    #  print(test)
+
+    for _ in range(1):
+        _, new_points = test_module(xyz)
+        new_points.backward(
+            torch.cuda.FloatTensor(*new_points.size()).fill_(1))
+        print(new_points)
+        print(xyz.grad)

@@ -9,7 +9,7 @@ import numpy as np
 import tensorboard_logger as tb_log
 import os
 
-from models.Pointnet2SemSeg import Pointnet2
+from models.Pointnet2SemSeg import Pointnet2SSG as Pointnet
 from models.Pointnet2SemSeg import model_fn_decorator
 from data.Indoor3DSemSegLoader import Indoor3DSemSeg
 import utils.pytorch_utils as pt_utils
@@ -25,7 +25,10 @@ parser.add_argument(
     default=2048,
     help="Number of points to train with [default: 2048]")
 parser.add_argument(
-    "-weight_decay", type=float, default=1e-5, help="L2 regularization coeff")
+    "-weight_decay",
+    type=float,
+    default=0,
+    help="L2 regularization coeff [default: 0.0]")
 parser.add_argument(
     "-lr",
     type=float,
@@ -70,23 +73,24 @@ if __name__ == "__main__":
     args = parser.parse_args()
     tb_log.configure('runs/{}'.format(args.run_name))
 
-    test_set = Indoor3DSemSeg(args.num_points, BASE_DIR, train=False)
+    test_set = Indoor3DSemSeg(
+        args.num_points, BASE_DIR, train=False, data_precent=0.01)
     test_loader = DataLoader(
         test_set,
         batch_size=args.batch_size,
         shuffle=True,
         pin_memory=True,
-        num_workers=1)
+        num_workers=2)
 
-    train_set = Indoor3DSemSeg(args.num_points, BASE_DIR)
+    train_set = Indoor3DSemSeg(args.num_points, BASE_DIR, data_precent=1.0)
     train_loader = DataLoader(
         train_set,
         batch_size=args.batch_size,
         pin_memory=True,
-        num_workers=1,
+        num_workers=2,
         shuffle=True)
 
-    model = Pointnet2(13)
+    model = Pointnet(13)
     model.cuda()
     optimizer = optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -117,7 +121,8 @@ if __name__ == "__main__":
         checkpoint_name="sem_seg_checkpoint",
         best_name="sem_seg_best",
         lr_scheduler=lr_scheduler,
-        bnm_scheduler=bnm_scheduler)
+        bnm_scheduler=bnm_scheduler,
+        eval_frequency=10)
 
     trainer.train(
         start_epoch,
@@ -127,4 +132,5 @@ if __name__ == "__main__":
         best_prec=best_prec)
 
     if epoch_start == args.epochs:
+        test_loader.dataset.data_precent = 1.0
         _ = trainer.eval_epoch(start_epoch, test_loader)

@@ -1,23 +1,35 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "ball_query_gpu.h"
 
-// input: dmat(b, m, n)
+// input: new_xyz(b, m, 3) xyz(b, n, 3)
 // output: idx(b, m, nsample)
 __global__ void query_ball_point_kernel(int b, int n, int m, float radius,
-					int nsample, const float *dmat,
-					long *idx) {
+					int nsample, const float *new_xyz,
+					const float *xyz, int *idx) {
 	int batch_index = blockIdx.x;
-	dmat += n * m * batch_index;
+	xyz += batch_index * n * 3;
+	new_xyz += batch_index * m * 3;
 	idx += m * nsample * batch_index;
 
 	int index = threadIdx.x;
 	int stride = blockDim.x;
-	for (int j = index; j < m; j+=stride) {
+
+	float radius2 = radius * radius;
+	for (int j = index; j < m; j += stride) {
+		float new_x = new_xyz[j * 3 + 0];
+		float new_y = new_xyz[j * 3 + 1];
+		float new_z = new_xyz[j * 3 + 2];
 		for (int k = 0, cnt = 0; k < n && cnt < nsample; ++k) {
-			float d = dmat[j * n + k];
-			if (d <= radius) {
+			float x = xyz[k * 3 + 0];
+			float y = xyz[k * 3 + 1];
+			float z = xyz[k * 3 + 2];
+			float d2 = (new_x - x) * (new_x - x) +
+				   (new_y - y) * (new_y - y) +
+				   (new_z - z) * (new_z - z);
+			if (d2 < radius2) {
 				if (cnt == 0) {
 					for (int l = 0; l < nsample; ++l) {
 						idx[j * nsample + l] = k;
@@ -31,13 +43,13 @@ __global__ void query_ball_point_kernel(int b, int n, int m, float radius,
 }
 
 void query_ball_point_kernel_wrapper(int b, int n, int m, float radius,
-				     int nsample, const float *dmat, long *idx,
+				     int nsample, const float *new_xyz,
+				     const float *xyz, int *idx,
 				     cudaStream_t stream) {
 
-
 	cudaError_t err;
-	query_ball_point_kernel<<<b, 256, 0, stream>>>(b, n, m, radius, nsample,
-						     dmat, idx);
+	query_ball_point_kernel<<<b, min(512, n), 0, stream>>>(
+	    b, n, m, radius, nsample, new_xyz, xyz, idx);
 
 	err = cudaGetLastError();
 	if (cudaSuccess != err) {
