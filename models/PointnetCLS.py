@@ -78,12 +78,6 @@ class Pointnet(nn.Module):
             kernel_size=[n_points, 1])
         return self.final_mlp(points.view(-1, 1024)), end_points
 
-    def set_bn_momentum(self, bn_momentum):
-        def fn(m):
-            if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-                m.momentum = bn_momentum
-
-        self.apply(fn)
 
     def apply_transform(self, points, rotation, scale=None):
         points = points @ rotation

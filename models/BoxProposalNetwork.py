@@ -83,12 +83,6 @@ class BoxProposalNetwork(nn.Module):
             dim=1)
         return self.box_head(stacked_feats), self.confidence_head(stacked_feats)
 
-    def set_bn_momentum(self, bn_momentum):
-        def fn(m):
-            if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-                m.momentum = bn_momentum
-
-        self.apply(fn)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+from torch.autograd.function import InplaceFunction
+from itertools import repeat
 import numpy as np
 import tensorboard_logger as tb_log
 import shutil, os
@@ -147,15 +149,65 @@ class FC(nn.Sequential):
             self.add_module('activation', activation)
 
 
-class RandomDropout1d(nn.Module):
-    def __init__(self, p=0.5):
-        super().__init__()
-        self.p = p
+class DropoutNoScaling(InplaceFunction):
+    @staticmethod
+    def _make_noise(input):
+        return input.new().resize_as_(input)
 
-    def forward(self, X):
-        theta = np.random.uniform(low=0.0, high=self.p)
-        return torch.nn.functional.dropout2d(
-            X.unsqueeze(1), p=theta, training=self.training).squeeze(1)
+    @staticmethod
+    def symbolic(g, input, p=0.5, train=False, inplace=False):
+        if inplace:
+            return None
+        n = g.appendNode(
+            g.create("Dropout", [input]).f_("ratio", p)
+            .i_("is_test", not train))
+        real = g.appendNode(g.createSelect(n, 0))
+        g.appendNode(g.createSelect(n, 1))
+        return real
+
+    @classmethod
+    def forward(cls, ctx, input, p=0.5, train=False, inplace=False):
+        if p < 0 or p > 1:
+            raise ValueError("dropout probability has to be between 0 and 1, "
+                             "but got {}".format(p))
+        ctx.p = p
+        ctx.train = train
+        ctx.inplace = inplace
+
+        if ctx.inplace:
+            ctx.mark_dirty(input)
+            output = input
+        else:
+            output = input.clone()
+
+        if ctx.p > 0 and ctx.train:
+            ctx.noise = cls._make_noise(input)
+            if ctx.p == 1:
+                ctx.noise.fill_(0)
+            else:
+                ctx.noise.bernoulli_(1 - ctx.p)
+            ctx.noise = ctx.noise.expand_as(input)
+            output.mul_(ctx.noise)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if ctx.p > 0 and ctx.train:
+            return grad_output.mul(Variable(ctx.noise)), None, None, None
+        else:
+            return grad_output, None, None, None
+
+
+class FeatureDropoutNoScaling(DropoutNoScaling):
+    @staticmethod
+    def symbolic(input, p=0.5, train=False, inplace=False):
+        return None
+
+    @staticmethod
+    def _make_noise(input):
+        return input.new().resize_(
+            input.size(0), input.size(1), *repeat(1, input.dim() - 2))
 
 
 def checkpoint_state(model, optimizer, best_prec, epoch):

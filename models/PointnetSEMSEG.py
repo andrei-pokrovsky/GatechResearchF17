@@ -63,12 +63,6 @@ class Pointnet(nn.Module):
         return self.final_convs(points_feat1_concat).squeeze(-1).transpose(
             1, 2).contiguous()
 
-    def set_bn_momentum(self, bn_momentum):
-        def fn(m):
-            if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-                m.momentum = bn_momentum
-
-        self.apply(fn)
 
 
 if __name__ == "__main__":

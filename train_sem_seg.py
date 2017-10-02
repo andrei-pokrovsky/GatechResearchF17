@@ -9,7 +9,7 @@ import numpy as np
 import tensorboard_logger as tb_log
 import os
 
-from models.Pointnet2SemSeg import Pointnet2SSG as Pointnet
+from models.Pointnet2SemSeg import Pointnet2MSG as Pointnet
 from models.Pointnet2SemSeg import model_fn_decorator
 from data.Indoor3DSemSegLoader import Indoor3DSemSeg
 import utils.pytorch_utils as pt_utils
@@ -47,8 +47,8 @@ parser.add_argument(
 parser.add_argument(
     "-bn_momentum",
     type=float,
-    default=0.5,
-    help="Initial batch norm momentum [default: 0.5]")
+    default=0.9,
+    help="Initial batch norm momentum [default: 0.9]")
 parser.add_argument(
     "-bn_decay",
     type=float,
@@ -131,6 +131,6 @@ if __name__ == "__main__":
         train_loader,
         best_prec=best_prec)
 
-    if epoch_start == args.epochs:
+    if start_epoch == args.epochs:
         test_loader.dataset.data_precent = 1.0
         _ = trainer.eval_epoch(start_epoch, test_loader)

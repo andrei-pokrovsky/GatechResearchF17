@@ -9,6 +9,17 @@ import pointnet2
 import pytorch_utils as pt_utils
 
 
+class RandomDropout(nn.Module):
+    def __init__(self, p=0.5, inplace=False):
+        super().__init__()
+        self.p = p
+        self.inplace = inplace
+
+    def forward(self, X):
+        theta = torch.Tensor(1).uniform_(0, self.p)[0]
+        return pt_utils.FeatureDropoutNoScaling.apply(X, theta, self.train, self.inplace)
+
+
 class FurthestPointSampling(Function):
     @staticmethod
     def forward(ctx, xyz: torch.Tensor, npoint: int) -> torch.Tensor:
@@ -37,8 +48,8 @@ class FurthestPointSampling(Function):
         temp = temp.contiguous()
         output = output.contiguous()
 
-        pointnet2.furthest_point_sampling_wrapper(B, N, npoint, xyz, temp, output)
-
+        pointnet2.furthest_point_sampling_wrapper(B, N, npoint, xyz, temp,
+                                                  output)
 
         return output
 
@@ -88,7 +99,9 @@ class GatherPoints(Function):
     def backward(ctx, a=None):
         return None, None
 
+
 gather_points = GatherPoints.apply
+
 
 class ThreeNN(Function):
     @staticmethod
@@ -308,35 +321,33 @@ class BallQuery(Function):
 ball_query = BallQuery.apply
 
 
-class SampleAndGroup(nn.Module):
+class QueryAndGroup(nn.Module):
     r"""
     Samples points using FPS, groups with a ball query of radius
 
     Parameters
     ---------
-    npoint : int32
-        Number of points to sample during the FPS sampling
     radius : float32
         Radius of ball
     nsample : int32
         Maximum number of points to gather in the ball
     """
 
-    def __init__(self,
-                 npoint: int,
-                 radius: float,
-                 nsample: int,
-                 use_xyz: bool = True):
+    def __init__(self, radius: float, nsample: int, use_xyz: bool = True):
         super().__init__()
-        self.npoint, self.radius, self.nsample, self.use_xyz = npoint, radius, nsample, use_xyz
+        self.radius, self.nsample, self.use_xyz = radius, nsample, use_xyz
 
-    def forward(self, xyz: torch.Tensor,
+    def forward(self,
+                xyz: torch.Tensor,
+                new_xyz: torch.Tensor,
                 points: torch.Tensor = None) -> (torch.Tensor, torch.Tensor):
         r"""
         Parameters
         ---------
         xyz : torch.Tensor
             xyz coordinates of the points (B, N, 3)
+        new_xyz : torch.Tensor
+            centriods (B, npoint, 3)
         points : torch.Tensor
             Descriptors of the points (B, N, C)
 
@@ -347,7 +358,6 @@ class SampleAndGroup(nn.Module):
         new_points : torch.Tensor
             (B, npoint, nsample, 3 + C) tensor
         """
-        new_xyz = gather_points(xyz, furthest_point_sample(xyz, self.npoint))  # (B, npoint, 3)
 
         idx = ball_query(self.radius, self.nsample, xyz, new_xyz)
         grouped_xyz = group_points(xyz, idx)  # (B, npoint, nsample, 3)
@@ -364,147 +374,4 @@ class SampleAndGroup(nn.Module):
         else:
             new_points = grouped_xyz
 
-        return new_xyz, new_points
-
-
-class PointnetSAModule(nn.Module):
-    r"""
-    Pointnet set abstrction layer
-    Parameters
-    ----------
-    npoint : int
-        Number of points
-    radius : float
-        Radius of ball
-    nsample : int
-        Number of samples in the ball query
-    mlp : list
-        Spec of the pointnet before the global max_pool
-    bn : bool
-        Use batchnorm
-    """
-
-    def __init__(self,
-                 npoint: int,
-                 radius: float,
-                 nsample: int,
-                 mlp: list,
-                 bn: bool = True):
-        super().__init__()
-
-        self.grouper = SampleAndGroup(npoint, radius, nsample)
-        self.mlp = pt_utils.SharedMLP(mlp, bn=bn)
-
-    def forward(self, xyz: torch.Tensor,
-                points: torch.Tensor = None) -> (torch.Tensor, torch.Tensor):
-        r"""
-        Parameters
-        ----------
-        xyz : torch.Tensor
-            (B, N, 3) tensor of the xyz coordinates of the points
-        point : torch.Tensor
-            (B, N, C) tensor of the descriptors of the the points
-
-        Returns
-        -------
-        new_xyz : torch.Tensor
-            (B, npoint, 3) tensor of the new points' xyz
-        new_points : torch.Tensor
-            (B, npoint, mlp[-1]) tensor of the new_points descriptors
-        """
-
-        new_xyz, new_points = self.grouper(
-            xyz, points)  # (B, npoint, 3), (B, npoint, nsample, 3 + C)
-        new_points = self.mlp(new_points.permute(
-            0, 3, 1, 2))  # (B, mlp[-1], npoint, nsample)
-        new_points = F.max_pool2d(
-            new_points,
-            kernel_size=[1, new_points.size(3)])  # (B, mlp[-1], npoint, 1)
-        new_points = new_points.squeeze(-1)  # (B, mlp[-1], npoint)
-        new_points = new_points.transpose(
-            1, 2).contiguous()  # (B, npoint, mlp[-1])
-
-        return new_xyz, new_points
-
-
-class PointnetFPModule(nn.Module):
-    r"""
-        Propigates the features of one set to another
-
-    Parameters
-    ----------
-    mlp : list
-        Pointnet module parameters
-    bn : bool
-        Use batchnorm
-    """
-
-    def __init__(self, mlp: list, bn: bool = True):
-        super().__init__()
-        self.mlp = pt_utils.SharedMLP(mlp, bn=bn)
-
-    def forward(self, unknown: torch.Tensor, known: torch.Tensor,
-                unknow_feats: torch.Tensor,
-                known_feats: torch.Tensor) -> torch.Tensor:
-        r"""
-        Parameters
-        ----------
-        unknown : torch.Tensor
-            (B, n, 3) tensor of the xyz positions of the unknown points
-        known : torch.Tensor
-            (B, m, 3) tensor of the xyz positions of the known points
-        unknow_feats : torch.Tensor
-            (B, n, C1) tensor of the features to be propigated to
-        known_feats : torch.Tensor
-            (B, m, C2) tensor of features to be propigated
-
-        Returns
-        -------
-        new_points : torch.Tensor
-            (B, n, mlp[-1]) tensor of the features of the unknown points
-        """
-
-        dist, idx = three_nn(unknown, known)
-        dist += 1e-10
-        dist_recip = 1.0 / dist
-        norm = torch.sum(dist_recip, dim=2, keepdim=True)
-        weight = dist_recip / norm
-
-        interpolated_feats = three_interpolate(known_feats, idx, weight)
-        if unknow_feats is not None:
-            new_points = torch.cat(
-                [interpolated_feats, unknow_feats], dim=-1)  #(B, n, C2 + C1)
-        else:
-            new_points = interpolated_feats
-
-        new_points = new_points.unsqueeze(-1).transpose(1,
-                                                        2)  #(B, C2 + C1, n, 1)
-        new_points = self.mlp(new_points)
-
-        return new_points.squeeze(-1).transpose(
-            1, 2).contiguous()  #(B, n, mlp[-1])
-
-
-if __name__ == "__main__":
-    torch.manual_seed(1)
-    torch.cuda.manual_seed_all(1)
-    xyz = Variable(torch.randn(2, 10, 3).cuda(), requires_grad=True)
-    xyz_feats = Variable(torch.randn(2, 2, 6).cuda(), requires_grad=True)
-
-    #  test_module = PointnetSAModule(1, radius=10.0, nsample=3, mlp=[3, 3])
-    #  test_module.cuda()
-    #  print(test_module(xyz))
-
-    test_module = PointnetFPModule(mlp=[6, 6])
-    test_module.cuda()
-    #  from torch.autograd import gradcheck
-    #  inputs = (xyz, xyz, None, xyz_feats)
-    #  test = gradcheck(test_module, inputs, eps=1e-6, atol=1e-4)
-    #  print(test)
-
-    for _ in range(1):
-        _, new_points = test_module(xyz, xyz, None, xyz_feats)
-        new_points.backward(
-            torch.cuda.FloatTensor(*new_points.size()).fill_(1))
-        print(new_points)
-        print(xyz.grad)
+        return new_points
