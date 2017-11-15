@@ -4,3 +4,4 @@ runs
 .vimtags
 .npy
 .ptx
+.pth*
