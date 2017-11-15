@@ -14,7 +14,7 @@ class PointcloudScale(object):
 
 
 class PointcloudRotate(object):
-    def __init__(self, x_axis=True, z_axis=False):
+    def __init__(self, x_axis=False, z_axis=True):
         assert x_axis or z_axis
         self.x, self.y = x_axis, z_axis
 
@@ -26,21 +26,21 @@ class PointcloudRotate(object):
         return cosval, sinval
 
     def __call__(self, points):
-        if self.x:
+        if self.z:
             sinval, cosval = self._get_angles()
-            x_mat = torch.FloatTensor([[cosval, 0, sinval], [0, 1, 0],
-                                       [-sinval, 0, cosval]])
+            Rz = torch.FloatTensor([[cosval, sinval, 0], [-sinval, cosval, 0],
+                                    [0, 0, 1]])
         else:
-            x_mat = torch.eye(3)
+            Rz = torch.eye(3)
 
         if self.x:
             sinval, cosval = self._get_angles()
-            z_mat = torch.FloatTensor([[cosval, -sinval, 0], [sinval, 1, cosval],
-                                       [0, 0, 1]])
+            Rx = torch.FloatTensor([[1, 0, 0], [0, cosval, sinval],
+                                    [0, -sinval, cosval]])
         else:
-            z_mat = torch.eye(3)
+            Rx = torch.eye(3)
 
-        rot_mat = z_mat @ x_mat
+        rot_mat = Rx @ Rz
 
         return points @ rot_mat
 

@@ -1,8 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "sampling_gpu.h"
 #include "cuda_utils.h"
+#include "sampling_gpu.h"
 
 // input: points(b, n, c) idx(b, m)
 // output: out(b, m, c)
@@ -35,6 +35,8 @@ void gather_points_kernel_wrapper(int b, int n, int c, int npoints,
     }
 }
 
+// Input dataset: (b, n, 3), tmp: (b, n)
+// Ouput idxs (b, m)
 __global__ void furthest_point_sampling_kernel(
     int b, int n, int m, const float *__restrict__ dataset,
     float *__restrict__ temp, int *__restrict__ idxs) {
@@ -43,66 +45,73 @@ __global__ void furthest_point_sampling_kernel(
     const int BlockSize = 512;
     __shared__ float dists[BlockSize];
     __shared__ int dists_i[BlockSize];
-    const int BufferSize = 3072;
-    __shared__ float buf[BufferSize * 3];
 
-    for (int i = blockIdx.x; i < b; i += gridDim.x) {
-	int old = 0;
-	if (threadIdx.x == 0)
-	    idxs[i * m + 0] = old;
-	for (int j = threadIdx.x; j < n; j += blockDim.x) {
-	    temp[blockIdx.x * n + j] = 1e38;
-	}
-	for (int j = threadIdx.x; j < min(BufferSize, n) * 3; j += blockDim.x) {
-	    buf[j] = dataset[i * n * 3 + j];
-	}
-	__syncthreads();
-	for (int j = 1; j < m; j++) {
-	    int besti = 0;
-	    float best = -1;
-	    float x1 = dataset[i * n * 3 + old * 3 + 0];
-	    float y1 = dataset[i * n * 3 + old * 3 + 1];
-	    float z1 = dataset[i * n * 3 + old * 3 + 2];
-	    for (int k = threadIdx.x; k < n; k += blockDim.x) {
-		float td = temp[blockIdx.x * n + k];
-		float x2, y2, z2;
-		if (k < BufferSize) {
-		    x2 = buf[k * 3 + 0];
-		    y2 = buf[k * 3 + 1];
-		    z2 = buf[k * 3 + 2];
-		} else {
-		    x2 = dataset[i * n * 3 + k * 3 + 0];
-		    y2 = dataset[i * n * 3 + k * 3 + 1];
-		    z2 = dataset[i * n * 3 + k * 3 + 2];
-		}
-		float d = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1) +
-			  (z2 - z1) * (z2 - z1);
-		float d2 = min(d, td);
-		if (d2 != td)
-		    temp[blockIdx.x * n + k] = d2;
-		if (d2 > best) {
-		    best = d2;
-		    besti = k;
-		}
+    int batch_index = blockIdx.x;
+    dataset += batch_index * n * 3;
+    temp += batch_index * n;
+    idxs += batch_index * m;
+
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+    int n_threads = stride;
+
+    int old = 0;
+    if (threadIdx.x == 0)
+	idxs[0] = old;
+
+    __syncthreads();
+    for (int j = 1; j < m; j++) {
+	int besti = 0;
+	float best = -1;
+	float x1 = dataset[old * 3 + 0];
+	float y1 = dataset[old * 3 + 1];
+	float z1 = dataset[old * 3 + 2];
+	for (int k = tid; k < n; k += stride) {
+	    float x2, y2, z2;
+	    x2 = dataset[k * 3 + 0];
+	    y2 = dataset[k * 3 + 1];
+	    z2 = dataset[k * 3 + 2];
+	    float d = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1) +
+		      (z2 - z1) * (z2 - z1);
+
+	    float d2 = min(d, temp[k]);
+	    temp[k] = d2;
+	    if (d2 > best) {
+		best = d2;
+		besti = k;
 	    }
-	    dists[threadIdx.x] = best;
-	    dists_i[threadIdx.x] = besti;
-	    for (int u = 0; (1 << u) < blockDim.x; u++) {
-		__syncthreads();
-		if (threadIdx.x < (blockDim.x >> (u + 1))) {
-		    int i1 = (threadIdx.x * 2) << u;
-		    int i2 = (threadIdx.x * 2 + 1) << u;
-		    if (dists[i1] < dists[i2]) {
-			dists[i1] = dists[i2];
-			dists_i[i1] = dists_i[i2];
-		    }
+	}
+	dists[tid] = best;
+	dists_i[tid] = besti;
+	__syncthreads();
+	for (int s = n_threads / 2; s > 0; s >>= 1) {
+	    if (tid < s) {
+		int idx1 = tid;
+		int idx2 = idx1 + s;
+		if (dists[idx2] > dists[idx1]) {
+		    dists[idx1] = dists[idx2];
+		    dists_i[idx1] = dists_i[idx2];
 		}
 	    }
 	    __syncthreads();
-	    old = dists_i[0];
-	    if (threadIdx.x == 0)
-		idxs[i * m + j] = old;
 	}
+	old = dists_i[0];
+	if (tid == 0)
+	    idxs[j] = old;
+
+	/* if (threadIdx.x == 0) {
+	    for (int i = 0; i < n_threads; ++i) {
+		if (dists[i] > best) {
+		    best = dists[i];
+		    besti = dists_i[i];
+		}
+	    }
+
+	    idxs[j] = besti;
+	}
+	__syncthreads();
+
+	old = idxs[j]; */
     }
 }
 
@@ -111,8 +120,8 @@ void furthest_point_sampling_kernel_wrapper(int b, int n, int m,
 					    int *idxs, cudaStream_t stream) {
 
     cudaError_t err;
-    furthest_point_sampling_kernel<<<b, opt_n_threads(n), 0, stream>>>(
-	b, n, m, dataset, temp, idxs);
+    furthest_point_sampling_kernel<<<b, max(opt_n_threads(n), 512), 0,
+				     stream>>>(b, n, m, dataset, temp, idxs);
 
     err = cudaGetLastError();
     if (cudaSuccess != err) {

@@ -6,10 +6,10 @@ from torch.utils.ffi import create_extension
 base_dir = path.dirname(path.abspath(__file__))
 extra_objects = [path.join(base_dir, m) for m in glob.glob(path.join(base_dir, "build/*.so"))]
 print(extra_objects)
-extra_objects += glob.glob('/usr/local/cuda/lib64/*.a')
+extra_objects += [a for a in glob.glob('/usr/local/cuda/lib64/*.a')]
 
 ffi = create_extension(
-    'pointnet2',
+    'cuda_bridge',
     headers=[a for a in glob.glob("cinclude/*_wrapper.h")],
     sources=[a for a in glob.glob("csrc/*.c")],
     define_macros=[('WITH_CUDA', None)],

@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 import pointnet2_utils
 import pytorch_utils as pt_utils
+from typing import List
 
 
 class PointnetSAModuleMSG(nn.Module):
@@ -24,10 +25,11 @@ class PointnetSAModuleMSG(nn.Module):
     """
 
     def __init__(self,
+                 *,
                  npoint: int,
-                 radii: list,
-                 nsamples: list,
-                 mlps: list,
+                 radii: List[float],
+                 nsamples: List[int],
+                 mlps: List[int],
                  bn: bool = True):
         super().__init__()
 
@@ -100,10 +102,11 @@ class PointnetSAModule(nn.Module):
     """
 
     def __init__(self,
+                 *,
                  npoint: int,
                  radius: float,
                  nsample: int,
-                 mlp: list,
+                 mlp: List[int],
                  bn: bool = True):
         super().__init__()
 
@@ -129,7 +132,8 @@ class PointnetSAModule(nn.Module):
             (B, npoint, mlp[-1]) tensor of the new_points descriptors
         """
 
-        new_xyz = pointnet2_utils.gather_points(xyz, pointnet2_utils.furthest_point_sample(xyz, self.npoint))
+        new_xyz = pointnet2_utils.gather_points(
+            xyz, pointnet2_utils.furthest_point_sample(xyz, self.npoint))
         new_points = self.grouper(xyz, new_xyz,
                                   points)  # (B, npoint, nsample, 3)
 
@@ -158,7 +162,7 @@ class PointnetFPModule(nn.Module):
         Use batchnorm
     """
 
-    def __init__(self, mlp: list, bn: bool = True):
+    def __init__(self, *, mlp: List[int], bn: bool = True):
         super().__init__()
         self.mlp = pt_utils.SharedMLP(mlp, bn=bn)
 
@@ -189,7 +193,8 @@ class PointnetFPModule(nn.Module):
         norm = torch.sum(dist_recip, dim=2, keepdim=True)
         weight = dist_recip / norm
 
-        interpolated_feats = pointnet2_utils.three_interpolate(known_feats, idx, weight)
+        interpolated_feats = pointnet2_utils.three_interpolate(
+            known_feats, idx, weight)
         if unknow_feats is not None:
             new_points = torch.cat(
                 [interpolated_feats, unknow_feats], dim=-1)  #(B, n, C2 + C1)

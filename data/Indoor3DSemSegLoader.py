@@ -3,9 +3,6 @@ import torch.utils.data as data
 import numpy as np
 import os, sys, h5py, subprocess, shlex
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(BASE_DIR)
-
 
 def _get_data_files(list_filename):
     return [line.rstrip() for line in open(list_filename)]
@@ -31,15 +28,14 @@ class Indoor3DSemSeg(data.Dataset):
         self.folder = "indoor3d_sem_seg_hdf5_data"
         self.data_dir = os.path.join(root, self.folder)
         self.url = "https://shapenet.cs.stanford.edu/media/indoor3d_sem_seg_hdf5_data.zip"
-        zipfile = os.path.basename(self.url)
 
         if download and not os.path.exists(self.data_dir):
-            zipfile = os.path.basename(self.url)
-            subprocess.check_call(shlex.split("wget {}".format(self.url)))
-            subprocess.check_call(shlex.split("unzip {}".format(zipfile)))
-            if os.path.dirname(os.path.abspath(__file__)) != root:
-                subprocess.check_call(
-                    shlex.shlex("mv {} {}".format(zipfile[:-4], root)))
+            zipfile = os.path.join(root, os.path.basename(self.url))
+            subprocess.check_call(
+                shlex.split("curl {} -o {}".format(self.url, zipfile)))
+
+            subprocess.check_call(shlex.split("unzip {} -d {}".format(zipfile, root)))
+
             subprocess.check_call(shlex.split("rm {}".format(zipfile)))
 
         self.train, self.num_points = train, num_points

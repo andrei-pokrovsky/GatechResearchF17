@@ -33,15 +33,14 @@ class ModelNet40Cls(data.Dataset):
         self.folder = "modelnet40_ply_hdf5_2048"
         self.data_dir = os.path.join(root, self.folder)
         self.url = "https://shapenet.cs.stanford.edu/media/modelnet40_ply_hdf5_2048.zip"
-        zipfile = os.path.basename(self.url)
 
         if download and not os.path.exists(self.data_dir):
-            zipfile = os.path.basename(self.url)
-            subprocess.check_call(shlex.split("wget {}".format(self.url)))
-            subprocess.check_call(shlex.split("unzip {}".format(zipfile)))
-            if os.path.dirname(os.path.abspath(__file__)) != root:
-                subprocess.check_call(
-                    shlex.shlex("mv {} {}".format(zipfile[:-4], root)))
+            zipfile = os.path.join(roo, os.path.basename(self.url))
+            subprocess.check_call(
+                shlex.split("curl {} -o {}".format(self.url, zipfile)))
+
+            subprocess.check_call(shlex.split("unzip {} -d {}".format(zipfile, root)))
+
             subprocess.check_call(shlex.split("rm {}".format(zipfile)))
 
         self.train, self.num_points = train, num_points
@@ -92,7 +91,6 @@ class ModelNet40Cls(data.Dataset):
 if __name__ == "__main__":
     from torchvision import transforms
     import data_utils as d_utils
-
 
     transforms = transforms.Compose([
         d_utils.PointcloudToTensor(),

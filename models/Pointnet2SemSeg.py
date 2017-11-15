@@ -17,7 +17,7 @@ def model_fn_decorator(criterion):
     def model_fn(model, inputs, labels):
         xyz = inputs[..., :3]
         if inputs.size(2) > 3:
-            points = inputs[..., 3:]
+            points = inputs[..., 3:6]
         else:
             points = None
 
@@ -33,12 +33,12 @@ def model_fn_decorator(criterion):
 
 
 class Pointnet2SSG(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, input_channels=9):
         super().__init__()
 
         self.initial_dropout = RandomDropout(0.4)
 
-        self.SA_module0 = PointnetSAModule(1024, 0.1, 32, mlp=[9, 32, 32, 64])
+        self.SA_module0 = PointnetSAModule(1024, 0.1, 32, mlp=[input_channels, 32, 32, 64])
         self.SA_module1 = PointnetSAModule(
             256, 0.2, 32, mlp=[64 + 3, 64, 64, 128])
         self.SA_module2 = PointnetSAModule(
@@ -78,11 +78,13 @@ class Pointnet2SSG(nn.Module):
 
 
 class Pointnet2MSG(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, input_channels=9):
         super().__init__()
-        self.initial_dropout = RandomDropout(0.4, inplace=True)
 
-        c_in = 9
+        self.initial_dropout = RandomDropout(0.95, inplace=True)
+        self.initial_dropout = None
+
+        c_in = input_channels
         self.SA_module0 = PointnetSAModuleMSG(
             1024,
             radii=[0.05, 0.1],
@@ -117,19 +119,21 @@ class Pointnet2MSG(nn.Module):
         self.FP_module3 = PointnetFPModule(mlp=[c_out_3 + c_out_2, 512, 512])
         self.FP_module2 = PointnetFPModule(mlp=[512 + c_out_1, 512, 512])
         self.FP_module1 = PointnetFPModule(mlp=[512 + c_out_0, 256, 256])
-        self.FP_module0 = PointnetFPModule(mlp=[256 + 6, 128, 128])
+        self.FP_module0 = PointnetFPModule(mlp=[256 + input_channels - 3, 128, 128])
 
         self.FC_layer = nn.Sequential(
             pt_utils.Conv1d(128, 128, bn=True),
             nn.Dropout(), pt_utils.Conv1d(128, num_classes, activation=None))
 
     def forward(self, xyz, points=None):
-        if points is not None:
+        if points is not None and self.initial_dropout is not None:
             tmp = self.initial_dropout(torch.cat([points, xyz], dim=-1))
-            l0_points, l0_xyz = tmp.split(points.size(-1), dim=-1)
-        else:
-            l0_xyz = self.initial_dropout(xyz)
-            l0_points = None
+            points, xyz = tmp.split(points.size(-1), dim=-1)
+        elif self.initial_dropout is not None:
+            xyz = self.initial_dropout(xyz)
+
+        l0_xyz, l0_points = xyz, points
+
 
         l1_xyz, l1_points = self.SA_module0(l0_xyz, l0_points)
         l2_xyz, l2_points = self.SA_module1(l1_xyz, l1_points)

@@ -5,8 +5,9 @@ import torch.nn.functional as F
 import torch.nn as nn
 from linalg_utils import pdist2, PDist2Order
 from collections import namedtuple
-import pointnet2
+import cuda_bridge as pointnet2
 import pytorch_utils as pt_utils
+from typing import List, Tuple
 
 
 class RandomDropout(nn.Module):
@@ -17,7 +18,8 @@ class RandomDropout(nn.Module):
 
     def forward(self, X):
         theta = torch.Tensor(1).uniform_(0, self.p)[0]
-        return pt_utils.FeatureDropoutNoScaling.apply(X, theta, self.train, self.inplace)
+        return pt_utils.feature_dropout_no_scaling(X, theta, self.train,
+                                                   self.inplace)
 
 
 class FurthestPointSampling(Function):
@@ -42,7 +44,7 @@ class FurthestPointSampling(Function):
         B, N, _ = xyz.size()
 
         output = torch.cuda.IntTensor(B, npoint)
-        temp = torch.cuda.FloatTensor(B, N)
+        temp = torch.cuda.FloatTensor(B, N).fill_(1e10)
 
         xyz = xyz.contiguous()
         temp = temp.contiguous()
@@ -106,7 +108,7 @@ gather_points = GatherPoints.apply
 class ThreeNN(Function):
     @staticmethod
     def forward(ctx, unknown: torch.Tensor,
-                known: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+                known: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""
             Find the three nearest neighbors of unknown in known
         Parameters
@@ -183,7 +185,7 @@ class ThreeInterpolate(Function):
 
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor
-                 ) -> (torch.Tensor, torch.Tensor, torch.Tensor):
+                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r"""
         Parameters
         ----------
@@ -248,7 +250,8 @@ class GroupPoints(Function):
         return output
 
     @staticmethod
-    def backward(ctx, grad_out: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+    def backward(ctx,
+                 grad_out: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""
 
         Parameters
@@ -337,10 +340,11 @@ class QueryAndGroup(nn.Module):
         super().__init__()
         self.radius, self.nsample, self.use_xyz = radius, nsample, use_xyz
 
-    def forward(self,
-                xyz: torch.Tensor,
-                new_xyz: torch.Tensor,
-                points: torch.Tensor = None) -> (torch.Tensor, torch.Tensor):
+    def forward(
+            self,
+            xyz: torch.Tensor,
+            new_xyz: torch.Tensor,
+            points: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""
         Parameters
         ---------

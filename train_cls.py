@@ -9,9 +9,9 @@ from torchvision import transforms
 import os
 import tensorboard_logger as tb_log
 
-from models.PointnetCLS import Pointnet
+from models import PointnetCls as Pointnet
 from models.PointnetCLS import model_fn_decorator
-from data.ModelNet40Loader import ModelNet40Cls
+from data import ModelNet40Cls
 import utils.pytorch_utils as pt_utils
 import utils.data_utils as d_utils
 import argparse
@@ -132,8 +132,8 @@ if __name__ == "__main__":
     trainer.train(
         start_epoch,
         args.epochs,
-        test_loader,
         train_loader,
+        test_loader,
         best_prec=best_prec)
 
     if start_epoch == args.epochs:

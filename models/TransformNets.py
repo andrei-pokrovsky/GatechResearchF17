@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+import torch.nn.functional as F
 
 import os, sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -17,10 +18,9 @@ class TransformNet(nn.Module):
         self.convs = nn.Sequential()
         self.convs.add_module('conv0',
                               pt_utils.Conv2d(
-                                  in_size, 64, [1, channels], bn=True))
+                                  in_size, 64, kernel_size=[1, channels], bn=True))
         self.convs.add_module('rest',
                               pt_utils.SharedMLP([64, 128, 1024], bn=True))
-        self.convs.add_module('pool', nn.AdaptiveMaxPool2d((1, 1)))
 
         self.fc = nn.Sequential(
             pt_utils.FC(1024, 512, bn=True), pt_utils.FC(512, 256, bn=True))
@@ -32,11 +32,11 @@ class TransformNet(nn.Module):
         self.final_W = nn.Parameter(torch.FloatTensor(256, outsize))
         self.final_b = nn.Parameter(torch.FloatTensor(outsize))
 
-
         self.init_weights()
 
     def forward(self, X):
         X = self.convs(X)
+        X = F.adaptive_max_pool2d(X, [1, 1])
         X = self.fc(X.view(-1, 1024))
         X = X @ self.final_W + self.final_b
 
@@ -46,13 +46,14 @@ class TransformNet(nn.Module):
         if not self.scale:
             return rotation, None
 
-        scale = X[:, -1]
+        scale = X[:, -1].contiguous()
 
         return rotation, scale
 
     def init_weights(self):
         torch.nn.init.constant(self.final_W, 0)
-        self.final_b.data[:self.K * self.K] = (torch.eye(self.K, self.K) + 1e-6 * torch.randn(self.K, self.K)).view(-1)
+        self.final_b.data[:self.K * self.K] = (torch.eye(
+            self.K, self.K) + 1e-1 * torch.randn(self.K, self.K)).view(-1)
         if self.scale:
             self.final_b.data[-1] = 1.0
 
@@ -72,4 +73,3 @@ if __name__ == "__main__":
     net = TranslationNet(5, 1, 3)
     net.init_weights()
     print(net(data))
-

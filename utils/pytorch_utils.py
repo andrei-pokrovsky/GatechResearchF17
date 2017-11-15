@@ -5,11 +5,18 @@ from torch.autograd.function import InplaceFunction
 from itertools import repeat
 import numpy as np
 import tensorboard_logger as tb_log
-import shutil, os
+import shutil, os, progressbar
+from natsort import natsorted
+from operator import itemgetter
+from typing import List, Tuple
 
 
 class SharedMLP(nn.Sequential):
-    def __init__(self, args, bn=False, activation=nn.ReLU()):
+    def __init__(self,
+                 args: List[int],
+                 *,
+                 bn: bool = False,
+                 activation=nn.ReLU(inplace=True)):
         super().__init__()
 
         for i in range(len(args) - 1):
@@ -32,9 +39,11 @@ class _ConvBase(nn.Sequential):
                  bn,
                  init,
                  conv=None,
-                 batch_norm=None):
+                 batch_norm=None,
+                 bias=True):
         super().__init__()
 
+        bias = bias and (not bn)
         self.add_module('conv',
                         conv(
                             in_size,
@@ -42,10 +51,10 @@ class _ConvBase(nn.Sequential):
                             kernel_size=kernel_size,
                             stride=stride,
                             padding=padding,
-                            bias=not bn))
+                            bias=bias))
         init(self[0].weight)
 
-        if not bn:
+        if bias:
             nn.init.constant(self[0].bias, 0)
 
         if bn:
@@ -59,14 +68,16 @@ class _ConvBase(nn.Sequential):
 
 class Conv1d(_ConvBase):
     def __init__(self,
-                 in_size,
-                 out_size,
-                 kernel_size=1,
-                 stride=1,
-                 padding=0,
-                 activation=nn.ReLU(),
-                 bn=False,
-                 init=nn.init.kaiming_normal):
+                 in_size: int,
+                 out_size: int,
+                 *,
+                 kernel_size: int = 1,
+                 stride: int = 1,
+                 padding: int = 0,
+                 activation=nn.ReLU(inplace=True),
+                 bn: bool = False,
+                 init=nn.init.kaiming_normal,
+                 bias: bool = True):
         super().__init__(
             in_size,
             out_size,
@@ -77,19 +88,22 @@ class Conv1d(_ConvBase):
             bn,
             init,
             conv=nn.Conv1d,
-            batch_norm=nn.BatchNorm1d)
+            batch_norm=nn.BatchNorm1d,
+            bias=bias)
 
 
 class Conv2d(_ConvBase):
     def __init__(self,
-                 in_size,
-                 out_size,
-                 kernel_size=(1, 1),
-                 stride=(1, 1),
-                 padding=(0, 0),
-                 activation=nn.ReLU(),
-                 bn=False,
-                 init=nn.init.kaiming_normal):
+                 in_size: int,
+                 out_size: int,
+                 *,
+                 kernel_size: Tuple[int, int] = (1, 1),
+                 stride: Tuple[int, int] = (1, 1),
+                 padding: Tuple[int, int] = (0, 0),
+                 activation=nn.ReLU(inplace=True),
+                 bn: bool = False,
+                 init=nn.init.kaiming_normal,
+                 bias: bool = True):
         super().__init__(
             in_size,
             out_size,
@@ -100,19 +114,22 @@ class Conv2d(_ConvBase):
             bn,
             init,
             conv=nn.Conv2d,
-            batch_norm=nn.BatchNorm2d)
+            batch_norm=nn.BatchNorm2d,
+            bias=bias)
 
 
 class Conv3d(_ConvBase):
     def __init__(self,
-                 in_size,
-                 out_size,
-                 kernel_size=(1, 1, 1),
-                 stride=(1, 1, 1),
-                 padding=(0, 0, 0),
-                 activation=nn.ReLU(),
-                 bn=False,
-                 init=nn.init.kaiming_normal):
+                 in_size: int,
+                 out_size: int,
+                 warning=None,
+                 kernel_size: Tuple[int, int, int] = (1, 1, 1),
+                 stride: Tuple[int, int, int] = (1, 1, 1),
+                 padding: Tuple[int, int, int] = (0, 0, 0),
+                 activation=nn.ReLU(inplace=True),
+                 bn: bool = False,
+                 init=nn.init.kaiming_normal,
+                 bias: bool = True):
         super().__init__(
             in_size,
             out_size,
@@ -123,15 +140,17 @@ class Conv3d(_ConvBase):
             bn,
             init,
             conv=nn.Conv3d,
-            batch_norm=nn.BatchNorm3d)
+            batch_norm=nn.BatchNorm3d,
+            bias=bias)
 
 
 class FC(nn.Sequential):
     def __init__(self,
-                 in_size,
-                 out_size,
-                 activation=nn.ReLU(),
-                 bn=False,
+                 in_size: int,
+                 out_size: int,
+                 *,
+                 activation=nn.ReLU(inplace=True),
+                 bn: bool = False,
                  init=nn.init.kaiming_normal):
         super().__init__()
         self.add_module('fc', nn.Linear(in_size, out_size, bias=not bn))
@@ -149,7 +168,7 @@ class FC(nn.Sequential):
             self.add_module('activation', activation)
 
 
-class DropoutNoScaling(InplaceFunction):
+class _DropoutNoScaling(InplaceFunction):
     @staticmethod
     def _make_noise(input):
         return input.new().resize_as_(input)
@@ -199,7 +218,10 @@ class DropoutNoScaling(InplaceFunction):
             return grad_output, None, None, None
 
 
-class FeatureDropoutNoScaling(DropoutNoScaling):
+dropout_no_scaling = _DropoutNoScaling.apply
+
+
+class _FeatureDropoutNoScaling(_DropoutNoScaling):
     @staticmethod
     def symbolic(input, p=0.5, train=False, inplace=False):
         return None
@@ -210,12 +232,19 @@ class FeatureDropoutNoScaling(DropoutNoScaling):
             input.size(0), input.size(1), *repeat(1, input.dim() - 2))
 
 
-def checkpoint_state(model, optimizer, best_prec, epoch):
+feature_dropout_no_scaling = _FeatureDropoutNoScaling.apply
+
+
+def checkpoint_state(model=None, optimizer=None, best_prec=None, epoch=None):
     return {
-        'epoch': epoch,
-        'best_prec': best_prec,
-        'model_state': model.state_dict(),
-        'optimizer_state': optimizer.state_dict()
+        'epoch':
+        epoch,
+        'best_prec':
+        best_prec,
+        'model_state':
+        model.state_dict() if model is not None else None,
+        'optimizer_state':
+        optimizer.state_dict() if optimizer is not None else None
     }
 
 
@@ -229,15 +258,17 @@ def save_checkpoint(state,
         shutil.copyfile(filename, '{}.pth.tar'.format(bestname))
 
 
-def load_checkpoint(model, optimizer, filename='checkpoint'):
+def load_checkpoint(model=None, optimizer=None, filename='checkpoint'):
     filename = "{}.pth.tar".format(filename)
     if os.path.isfile(filename):
         print("==> Loading from checkpoint '{}'".format(filename))
         checkpoint = torch.load(filename)
         epoch = checkpoint['epoch']
         best_prec = checkpoint['best_prec']
-        model.load_state_dict(checkpoint['model_state'])
-        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        if model is not None:
+            model.load_state_dict(checkpoint['model_state'])
+        if optimizer is not None:
+            optimizer.load_state_dict(checkpoint['optimizer_state'])
         print("==> Done")
     else:
         print("==> Checkpoint '{}' not found".format(filename))
@@ -259,13 +290,12 @@ class BNMomentumScheduler(object):
                  bn_lambda,
                  last_epoch=-1,
                  setter=set_bn_momentum_default):
-        self.model = model
-        self.setter = setter
-
         if not isinstance(model, nn.Module):
             raise RuntimeError("Class '{}' is not a PyTorch nn Module".format(
                 type(model).__name__))
 
+        self.model = model
+        self.setter = setter
         self.lmbd = bn_lambda
 
         self.step(last_epoch + 1)
@@ -300,6 +330,8 @@ class Trainer(object):
         Batchnorm momentum scheduler.  .step() will be called at the start of every epoch
     eval_frequency : int
         How often to run an eval
+    log_name : str
+        Name of file to output tensorboard_logger to
     """
 
     def __init__(self,
@@ -310,96 +342,99 @@ class Trainer(object):
                  best_name="best",
                  lr_scheduler=None,
                  bnm_scheduler=None,
-                 eval_frequency=1):
+                 eval_frequency=1,
+                 log_name=None):
         self.model, self.model_fn, self.optimizer, self.lr_scheduler, self.bnm_scheduler = (
             model, model_fn, optimizer, lr_scheduler, bnm_scheduler)
 
         self.checkpoint_name, self.best_name = checkpoint_name, best_name
         self.eval_frequency = eval_frequency
 
+        if log_name is not None:
+            tb_log.configure(log_name)
+            self.logging = True
+        else:
+            self.logging = False
+
+    @staticmethod
+    def _print(mode, epoch, loss, eval_dict, count):
+        to_print = "[{:d}] {}\tMean Loss: {:.4e}".format(
+            epoch, mode, loss / count)
+        for k, v in natsorted(eval_dict.items(), key=itemgetter(0)):
+            to_print += "\tMean {}: {:2.3f}%".format(k, (v / count) * 1e2)
+
+        print(to_print)
+
     def _train_epoch(self, epoch, d_loader):
         self.model.train()
-        total_loss, total_correct, total_seen, count = (0.0, ) * 4
+        total_loss = 0.0
+        eval_dict = {}
+        count = 0.0
 
-        next_progress_post = 20.0
-        for i, data in enumerate(d_loader, 0):
-            inputs, labels = data
-            inputs, labels = Variable(inputs.cuda()), Variable(labels.cuda())
-
+        bar = progressbar.ProgressBar()
+        for i, data in bar(enumerate(d_loader, 0), max_value=len(d_loader)):
             self.optimizer.zero_grad()
-            _, loss, num_correct = self.model_fn(self.model, inputs, labels)
+            _, loss, eval_res = self.model_fn(self.model, data, epoch=epoch)
 
             loss.backward()
             self.optimizer.step()
+
             total_loss += loss.data[0]
+            for k, v in eval_res.items():
+                eval_dict[k] = v + eval_dict.get(k, 0.0)
+
             count += 1.0
 
-            total_correct += num_correct
-            total_seen += labels.numel()
-
-            idx = (epoch - 1) * len(d_loader) + i
-            tb_log.log_value("Training loss", loss.data[0], step=idx)
-            tb_log.log_value(
-                "Training error",
-                1.0 - (num_correct / labels.numel()),
-                step=idx)
-
-            progress = float(i) / len(d_loader) * 1e2
-            if progress > next_progress_post:
-                print("Epoch {} progress: [{:<5d} / {:<5d} ({:3.0f})%]".format(
-                    epoch, i, len(d_loader), progress))
-                next_progress_post += 20.0
+            if self.logging:
+                idx = (epoch - 1) * len(d_loader) + i
+                tb_log.log_value("Training loss", loss.data[0], step=idx)
+                for k, v in eval_res.items():
+                    tb_log.log_value(
+                        "Training {}".format(k), 1.0 - v, step=idx)
 
             d_loader.dataset.randomize()
 
-        print("[{}] Mean loss: {:2.4f}  Mean Acc: {:2.3f}%".format(
-            epoch, total_loss / count, total_correct / total_seen * 1e2))
+        self._print("Train", epoch, total_loss, eval_dict, count)
 
     def eval_epoch(self, epoch, d_loader):
         if d_loader is None:
             return
 
         self.model.eval()
-        num_points = 2**8
-        accuracy = []
-        losses = []
-        while num_points <= 2**12:
-            d_loader.dataset.set_num_points(num_points)
-            total_correct = 0.0
-            total_seen = 0.0
-            total_loss = 0.0
-            for i, data in enumerate(d_loader, 0):
-                self.model.zero_grad()
+        total_loss = 0.0
+        eval_dict = {}
+        count = 0.0
 
-                inputs, labels = data
-                inputs, labels = Variable(
-                    inputs.cuda(), volatile=True), Variable(
-                        labels.cuda(), volatile=True)
+        bar = progressbar.ProgressBar()
+        for i, data in bar(enumerate(d_loader, 0), max_value=len(d_loader)):
+            self.optimizer.zero_grad()
 
-                _, loss, num_correct = self.model_fn(self.model, inputs,
-                                                     labels)
+            _, loss, eval_res = self.model_fn(
+                self.model, data, eval=True, epoch=epoch)
 
-                total_loss += loss.data[0]
-                total_correct += num_correct
-                total_seen += labels.numel()
-                d_loader.dataset.randomize()
+            total_loss += loss.data[0]
+            count += 1
+            for k, v in eval_res.items():
+                eval_dict[k] = v + eval_dict.get(k, 0.0)
 
-            print("[{}, {}] Eval Accuracy: {:2.3f}%\t\tEval Loss: {:1.3f}".
-                  format(epoch, num_points, total_correct / total_seen * 1e2,
-                         total_loss / len(d_loader)))
-            num_points *= 2
+            if self.logging:
+                idx = (epoch - 1) * len(d_loader) + i
+                tb_log.log_value("Eval loss", loss.data[0], step=idx)
+                for k, v in eval_res.items():
+                    tb_log.log_value("Eval {}".format(k), 1.0 - v, step=idx)
 
-            accuracy.append(total_correct / total_seen)
-            losses.append(total_loss / len(d_loader))
+            d_loader.dataset.randomize()
 
-        return np.mean(accuracy), np.mean(losses)
+        self._print("Eval", epoch, total_loss, eval_dict, count)
+
+        return total_loss / count, eval_dict
 
     def train(self,
               start_epoch,
               n_epochs,
-              test_loader,
               train_loader,
-              best_prec=0.0):
+              test_loader=None,
+              best_loss=0.0):
         r"""
            Call to begin training the model
 
@@ -423,28 +458,20 @@ class Trainer(object):
             if self.bnm_scheduler is not None:
                 self.bnm_scheduler.step()
 
-            print("{0}TRAIN{0}".format("-" * 5))
+            print("\n{0} Train Epoch {1:0>3d} {0}\n".format("-" * 5, epoch))
             self._train_epoch(epoch, train_loader)
 
             if test_loader is not None:
-                old_precent = test_loader.dataset.data_precent
-                if epoch % self.eval_frequency == 0:
-                    test_loader.dataset.data_precent = 1.0
+                print("\n{0} Eval Epoch {1:0>3d} {0}\n".format("-" * 5, epoch))
+                val_loss, _ = self.eval_epoch(epoch, test_loader)
 
-                print("{0}EVAL{0}".format("-" * 5))
-                val_prec, val_loss = self.eval_epoch(epoch, test_loader)
-                tb_log.log_value('Validation error', 1.0 - val_prec, epoch - 1)
-                tb_log.log_value('Validation loss', val_loss, epoch - 1)
-
-                is_best = val_prec > best_prec
-                best_prec = max(val_prec, best_prec)
+                is_best = val_loss < best_loss
+                best_loss = min(best_loss, val_loss)
                 save_checkpoint(
-                    checkpoint_state(self.model, self.optimizer, best_prec,
+                    checkpoint_state(self.model, self.optimizer, val_loss,
                                      epoch),
                     is_best,
                     filename=self.checkpoint_name,
                     bestname=self.best_name)
-
-                test_loader.dataset.data_precent = old_precent
 
         return best_prec
